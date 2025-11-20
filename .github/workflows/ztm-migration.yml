@@ -37,4 +37,4 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           # run login-and-trigger using service principal, supply CSV path and Mode
-          .\0-touch\login-and-trigger.ps1 -UseServicePrincipal -InputCsv $env:MIG_INPUT_CSV -Mode $env:MIG_MODE
+          .\login-and-trigger.ps1 -UseServicePrincipal -InputCsv $env:MIG_INPUT_CSV -Mode $env:MIG_MODE

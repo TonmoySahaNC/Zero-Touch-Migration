@@ -3,9 +3,24 @@ param(
     [Parameter(Mandatory = $true)][string]$DiscoveryFile
 )
 
-# -------------------------
-# Helpers
-# -------------------------
+function Get-MigInput {
+    param(
+        [string]$EnvName,
+        [string]$Prompt
+    )
+
+    $val = $env:$EnvName
+    if ($val -and $val -ne "") {
+        return $val
+    }
+
+    return Read-Host $Prompt
+}
+
+$nonInteractive = $false
+if ($env:MIG_NONINTERACTIVE -eq "true") {
+    $nonInteractive = $true
+}
 
 function Read-DiscoveryFile {
     param([string]$path)
@@ -15,9 +30,11 @@ function Read-DiscoveryFile {
 
 function Sanitize-ResourceName {
     param([string]$name)
+
     if (-not $name -or $name -eq "") {
         $name = "vm" + (Get-Random -Minimum 1000 -Maximum 9999)
     }
+
     $chars = $name.ToCharArray()
     $out = ""
     foreach ($c in $chars) {
@@ -25,6 +42,7 @@ function Sanitize-ResourceName {
             $out += $c
         }
     }
+
     $out = $out.Trim("-")
     if ($out.Length -gt 64) {
         $out = $out.Substring(0,64)
@@ -32,14 +50,17 @@ function Sanitize-ResourceName {
     if ($out -eq "") {
         $out = "vm" + (Get-Random -Minimum 1000 -Maximum 9999)
     }
+
     return $out
 }
 
 function Make-WindowsComputerName {
     param([string]$baseName)
+
     if (-not $baseName -or $baseName -eq "") {
         $baseName = "win" + (Get-Random -Minimum 10 -Maximum 99)
     }
+
     $chars = $baseName.ToCharArray()
     $out = ""
     foreach ($c in $chars) {
@@ -47,28 +68,36 @@ function Make-WindowsComputerName {
             $out += $c
         }
     }
+
     if ($out.Length -gt 12) {
         $out = $out.Substring(0,12)
     }
+
     $rnd = (Get-Random -Minimum 100 -Maximum 999).ToString()
     $candidate = $out + $rnd
+
     if ($candidate.Length -gt 15) {
         $candidate = $candidate.Substring(0,15)
     }
+
     if ($candidate -match "^[0-9]+$") {
-        $candidate = "win" + $candidate.Substring(0, 12)
+        $candidate = "win" + $candidate.Substring(0,12)
     }
+
     return $candidate
 }
 
 function Get-LatestDiscoveryData {
     param($rawObj)
+
     if ($null -eq $rawObj) {
         return $null
     }
 
-    if ($rawObj.PSObject.Properties.Match("properties") -and $rawObj.properties -and
-        $rawObj.properties.PSObject.Properties.Match("discoveryData") -and $rawObj.properties.discoveryData) {
+    if ($rawObj.PSObject.Properties.Match("properties") -and
+        $rawObj.properties -and
+        $rawObj.properties.PSObject.Properties.Match("discoveryData") -and
+        $rawObj.properties.discoveryData) {
 
         $arr = $rawObj.properties.discoveryData
 
@@ -274,12 +303,8 @@ function Get-CoresAndRamFromDiscovery {
     return $ret
 }
 
-# -------------------------
-# Main
-# -------------------------
-
 try {
-    Write-Host "Reading discovery file:" $DiscoveryFile
+    Write-Host "Reading discovery file: $DiscoveryFile"
     $machinesOrig = Read-DiscoveryFile -path $DiscoveryFile
 
     if (-not $machinesOrig) {
@@ -290,8 +315,9 @@ try {
 
     foreach ($m in $machinesOrig) {
         $disc = Get-LatestDiscoveryData -rawObj $m.Raw
-        $preferredName = ""
-        $os = ""
+
+        $preferredName     = ""
+        $os                = ""
         $rawDiscoveryEntry = $null
 
         if ($disc -ne $null) {
@@ -306,23 +332,23 @@ try {
             }
         }
 
-        if ($preferredName -eq "" -or $preferredName -eq $null) {
+        if (-not $preferredName) {
             if ($m.PSObject.Properties.Match("MachineName") -and $m.MachineName) {
                 $preferredName = $m.MachineName
             }
         }
 
-        if ($preferredName -eq "" -or $preferredName -eq $null) {
+        if (-not $preferredName) {
             $preferredName = "vm" + (Get-Random -Minimum 1000 -Maximum 9999)
         }
 
-        if ($os -eq "" -or $os -eq $null) {
+        if (-not $os) {
             if ($m.PSObject.Properties.Match("OS") -and $m.OS) {
                 $os = $m.OS
             }
         }
 
-        if ($os -eq "" -or $os -eq $null) {
+        if (-not $os) {
             $os = "UNKNOWN"
         }
 
@@ -342,7 +368,6 @@ try {
         $tempList += $wrapper
     }
 
-    # dedupe by PreferredName (case-insensitive)
     $seen = @{}
     $machines = @()
 
@@ -354,29 +379,33 @@ try {
         }
     }
 
-    Write-Host "Loaded" $machinesOrig.Count "machines in file, after dedupe" $machines.Count
+    Write-Host ("Loaded " + $machinesOrig.Count + " machines in file, after dedupe " + $machines.Count)
 
     Write-Host "Choose mode:"
     Write-Host "1) DryRun"
     Write-Host "2) Replicate"
-    $choice = Read-Host "Enter 1 or 2"
 
-    $targetSub      = Read-Host "Enter target subscription id"
-    $targetRG       = Read-Host "Enter target resource group name"
-    $targetVNet     = Read-Host "Enter target VNet name"
-    $targetSubnet   = Read-Host "Enter target Subnet name"
-    $targetLocation = Read-Host "Enter target location/region (example: swedencentral). Leave blank to use VNet location."
-    $storageAccountName = Read-Host "Enter storage account name for boot diagnostics (leave blank to allow script to create one)"
+    $choice = Get-MigInput -EnvName "MIG_MODE" -Prompt "Enter 1 or 2"
+    if ($choice -eq "DryRun")     { $choice = "1" }
+    elseif ($choice -eq "Replicate") { $choice = "2" }
+
+    $targetSub      = Get-MigInput -EnvName "MIG_TGT_SUBSCRIPTION_ID" -Prompt "Enter target subscription id"
+    $targetRG       = Get-MigInput -EnvName "MIG_TGT_RG"              -Prompt "Enter target resource group name"
+    $targetVNet     = Get-MigInput -EnvName "MIG_TGT_VNET"            -Prompt "Enter target VNet name"
+    $targetSubnet   = Get-MigInput -EnvName "MIG_TGT_SUBNET"          -Prompt "Enter target Subnet name"
+    $targetLocation = Get-MigInput -EnvName "MIG_TGT_LOCATION"        -Prompt "Enter target location/region (example: swedencentral). Leave blank to use VNet location."
+
+    $storageAccountName = Get-MigInput -EnvName "MIG_TGT_BOOTDIAG_SA_NAME" -Prompt "Enter storage account name for boot diagnostics (leave blank to allow script to create one)"
     $storageAccountRG   = ""
 
     if ($storageAccountName -ne "" -and $storageAccountName -ne $null) {
-        $storageAccountRG = Read-Host "Enter resource group of storage account (required if you supplied a storage account name)"
+        $storageAccountRG = Get-MigInput -EnvName "MIG_TGT_BOOTDIAG_SA_RG" -Prompt "Enter resource group of storage account (required if you supplied a storage account name)"
         if (-not $storageAccountRG) {
             throw "Storage account resource group required when storage account name is provided."
         }
     }
 
-    Write-Host "Setting target subscription context to" $targetSub
+    Write-Host "Setting target subscription context to $targetSub"
     Set-AzContext -Subscription $targetSub -ErrorAction Stop
 
     $rgObj = Get-AzResourceGroup -Name $targetRG -ErrorAction SilentlyContinue
@@ -396,19 +425,19 @@ try {
             break
         }
     }
+
     if (-not $subnetObj) {
         throw ("Target Subnet not found: " + $targetSubnet)
     }
 
     if (-not $targetLocation -or $targetLocation -eq "") {
         $targetLocation = $vnet.Location
-        Write-Host "No location provided. Using VNet location:" $targetLocation
+        Write-Host "No location provided. Using VNet location: $targetLocation"
     }
     else {
-        Write-Host "Using provided location:" $targetLocation
+        Write-Host "Using provided location: $targetLocation"
     }
 
-    # Storage account handling
     $useStorageAccount = $false
     $sa = $null
 
@@ -419,45 +448,56 @@ try {
             if ($sa.Sku.Name -notmatch "Standard" -or
                 ($sa.Kind -ne "StorageV2" -and $sa.Kind -ne "Storage")) {
 
-                Write-Host "Warning: Storage account" $storageAccountName "found but SKU or Kind may be incompatible."
-                Write-Host "Kind:" $sa.Kind "Sku:" $sa.Sku.Name
-                $resp = Read-Host "Proceed to use it anyway? Enter Y to use, N to abort"
-                if ($resp -ne "Y") {
-                    throw "User aborted due to incompatible storage account."
+                Write-Host "Warning: Storage account $storageAccountName found but SKU or Kind may be incompatible."
+                Write-Host ("Kind: " + $sa.Kind + " Sku: " + $sa.Sku.Name)
+
+                if ($nonInteractive) {
+                    throw "Storage account $storageAccountName is incompatible and MIG_NONINTERACTIVE is true. Aborting."
+                }
+                else {
+                    $resp = Read-Host "Proceed to use it anyway? Enter Y to use, N to abort"
+                    if ($resp -ne "Y") {
+                        throw "User aborted due to incompatible storage account."
+                    }
                 }
             }
 
             $useStorageAccount = $true
-            Write-Host "Using provided storage account:" $storageAccountName "in RG" $storageAccountRG
+            Write-Host "Using provided storage account: $storageAccountName in RG $storageAccountRG"
         }
         catch {
-            Write-Host "Storage account" $storageAccountName "in RG" $storageAccountRG "not found or not accessible."
-            $create = Read-Host "Do you want to create it now in RG $storageAccountRG and location $targetLocation? (Y/N)"
-            if ($create -eq "Y") {
-                Write-Host "Creating storage account" $storageAccountName "in RG" $storageAccountRG "Location:" $targetLocation
-                try {
-                    $sa = New-AzStorageAccount -ResourceGroupName $storageAccountRG -Name $storageAccountName -Location $targetLocation -SkuName Standard_LRS -Kind StorageV2 -ErrorAction Stop
-                    Write-Host "Storage account created:" $storageAccountName
-                    $useStorageAccount = $true
-                }
-                catch {
-                    throw ("Failed to create storage account " + $storageAccountName + ": " + $_)
-                }
+            Write-Host "Storage account $storageAccountName in RG $storageAccountRG not found or not accessible."
+
+            if ($nonInteractive) {
+                throw "Storage account $storageAccountName not found and MIG_NONINTERACTIVE is true. Aborting to avoid auto-creation."
             }
             else {
-                throw ("Storage account " + $storageAccountName + " not found and user chose not to create one. Aborting to avoid auto-creation.")
+                $create = Read-Host "Do you want to create it now in RG $storageAccountRG and location $targetLocation? (Y/N)"
+                if ($create -eq "Y") {
+                    Write-Host "Creating storage account $storageAccountName in RG $storageAccountRG Location: $targetLocation"
+                    try {
+                        $sa = New-AzStorageAccount -ResourceGroupName $storageAccountRG -Name $storageAccountName -Location $targetLocation -SkuName Standard_LRS -Kind StorageV2 -ErrorAction Stop
+                        Write-Host "Storage account created: $storageAccountName"
+                        $useStorageAccount = $true
+                    }
+                    catch {
+                        throw ("Failed to create storage account " + $storageAccountName + ": " + $_)
+                    }
+                }
+                else {
+                    throw ("Storage account " + $storageAccountName + " not found and user chose not to create one. Aborting to avoid auto-creation.")
+                }
             }
         }
     }
 
-    # DryRun
     $report = @()
 
     foreach ($w in $machines) {
         $preferredName = $w.PreferredName
-        $os = $w.OS
-        $san = Sanitize-ResourceName -name $preferredName
-        $exists = $false
+        $os            = $w.OS
+        $san           = Sanitize-ResourceName -name $preferredName
+        $exists        = $false
 
         try {
             $vmCheck = Get-AzVM -Name $san -ResourceGroupName $targetRG -ErrorAction SilentlyContinue
@@ -468,10 +508,10 @@ try {
         catch {}
 
         $row = [PSCustomObject]@{
-            MachineName   = $preferredName
-            OS            = $os
-            CPU_Cores     = $w.Cores
-            RAM_GB        = $w.RAM_GB
+            MachineName    = $preferredName
+            OS             = $os
+            CPU_Cores      = $w.Cores
+            RAM_GB         = $w.RAM_GB
             TargetVMExists = $exists
         }
         $report += $row
@@ -479,34 +519,34 @@ try {
 
     Write-Host ""
     Write-Host "===== DryRun Validation ====="
+    Write-Host ""
     $report | Format-Table -AutoSize
 
     if ($choice -eq "1") {
         Write-Host ""
         Write-Host "DryRun complete. No replication executed."
-        $go = Read-Host "Enter Y to start replication or any other key to exit"
+        $go = Get-MigInput -EnvName "MIG_CONFIRM_REPLICATION" -Prompt "Enter Y to start replication or any other key to exit"
         if ($go -ne "Y") {
             exit 0
         }
     }
 
-    # Replication loop
     foreach ($w in $machines) {
         $preferredName = $w.PreferredName
-        $os = $w.OS
-        $raw = $w.Raw
+        $os            = $w.OS
+        $raw           = $w.Raw
 
-        if ($os -eq "" -or $os -eq $null) {
+        if (-not $os -or $os -eq "") {
             throw ("OS UNKNOWN for " + $preferredName + ". Fix discovery JSON.")
         }
 
-        Write-Host "Processing machine:" $preferredName "(OS:" $os ")"
+        Write-Host ("Processing machine: " + $preferredName + " (OS: " + $os + ")")
 
         $vmName = Sanitize-ResourceName -name $preferredName
 
         $imageObj = Map-Image-From-OS -osString $os
         if (-not $imageObj) {
-            Write-Host "Could not map OS automatically for:" $os
+            Write-Host ("Could not map OS automatically for: " + $os)
             $pub   = Read-Host "Publisher (example: MicrosoftWindowsServer or Canonical)"
             $offer = Read-Host "Offer (example: WindowsServer or UbuntuServer)"
             $sku   = Read-Host "Sku (example: 2019-datacenter or 20_04-lts)"
@@ -518,16 +558,16 @@ try {
             }
         }
         else {
-            Write-Host "Selected image:" $imageObj.Publisher "/" $imageObj.Offer "/" $imageObj.Sku
+            Write-Host ("Selected image: " + $imageObj.Publisher + " / " + $imageObj.Offer + " / " + $imageObj.Sku)
         }
 
         $nicName = $vmName + "-nic"
         $nic = Get-AzNetworkInterface -Name $nicName -ResourceGroupName $targetRG -ErrorAction SilentlyContinue
         if ($nic) {
-            Write-Host "Using existing NIC:" $nicName
+            Write-Host "Using existing NIC: $nicName"
         }
         else {
-            Write-Host "Creating NIC:" $nicName
+            Write-Host "Creating NIC: $nicName"
             $nic = New-AzNetworkInterface -Name $nicName -ResourceGroupName $targetRG -Location $targetLocation -SubnetId $subnetObj.Id -ErrorAction Stop
         }
 
@@ -536,9 +576,10 @@ try {
             $isWindows = $true
         }
 
+        $computerName = ""
         if ($isWindows) {
             $computerName = Make-WindowsComputerName -baseName $preferredName
-            Write-Host "Using Windows computer name:" $computerName
+            Write-Host "Using Windows computer name: $computerName"
         }
         else {
             $chars = $preferredName.ToCharArray()
@@ -551,68 +592,107 @@ try {
             if ($outHost.Length -gt 63) {
                 $outHost = $outHost.Substring(0,63)
             }
+            if (-not $outHost) {
+                $outHost = "linuxvm" + (Get-Random -Minimum 1000 -Maximum 9999)
+            }
             $computerName = $outHost
-            Write-Host "Using Linux hostname:" $computerName
+            Write-Host "Using Linux hostname: $computerName"
         }
 
-        # Admin user
-        $adminUser = ""
-        while ($true) {
-            if ($isWindows) {
-                $adminUser = Read-Host ("Enter local admin username for Windows VM " + $vmName)
-            }
-            else {
-                $adminUser = Read-Host ("Enter admin username for Linux VM " + $vmName)
+        $adminUserEnv = $env:MIG_ADMIN_USERNAME
+        $adminPassEnv = $env:MIG_ADMIN_PASSWORD
+        $adminUser    = ""
+        $adminPass    = $null
+
+        if ($isWindows) {
+            if ($nonInteractive -and (-not $adminUserEnv -or -not $adminPassEnv)) {
+                throw "In non-interactive mode, MIG_ADMIN_USERNAME and MIG_ADMIN_PASSWORD must be set for Windows VMs."
             }
 
-            if ($isWindows) {
+            if ($adminUserEnv -and $adminUserEnv -ne "" -and $adminPassEnv -and $adminPassEnv -ne "") {
+                $adminUser = $adminUserEnv
+
                 $forbidden = @(
-                    [char]92,  # \
-                    [char]47,  # /
-                    [char]59,  # ;
-                    [char]58,  # :
-                    [char]42,  # *
-                    [char]96,  # `
-                    [char]34,  # "
-                    [char]124, # |
-                    [char]32   # space
+                    [char]92,
+                    [char]47,
+                    [char]59,
+                    [char]58,
+                    [char]42,
+                    [char]96,
+                    [char]34,
+                    [char]124,
+                    [char]32
                 )
                 $bad = $false
-
-                if (-not $adminUser -or $adminUser -eq "") {
-                    $bad = $true
-                }
-
                 foreach ($ch in $forbidden) {
                     if ($adminUser.Contains($ch)) {
                         $bad = $true
                         break
                     }
                 }
-
-                if (-not $bad) {
-                    break
+                if ($bad) {
+                    throw "MIG_ADMIN_USERNAME contains invalid characters for Windows in non-interactive mode."
                 }
 
-                Write-Host "Invalid username. No spaces or these characters: \ / ; : * ` \" | and cannot be empty."
+                $adminPass = ConvertTo-SecureString $adminPassEnv -AsPlainText -Force
             }
             else {
-                break
+                while ($true) {
+                    $adminUser = Read-Host ("Enter local admin username for Windows VM " + $vmName)
+
+                    $forbidden = @(
+                        [char]92,
+                        [char]47,
+                        [char]59,
+                        [char]58,
+                        [char]42,
+                        [char]96,
+                        [char]34,
+                        [char]124,
+                        [char]32
+                    )
+                    $bad = $false
+
+                    if (-not $adminUser -or $adminUser -eq "") {
+                        $bad = $true
+                    }
+
+                    foreach ($ch in $forbidden) {
+                        if ($adminUser.Contains($ch)) {
+                            $bad = $true
+                            break
+                        }
+                    }
+
+                    if (-not $bad) {
+                        break
+                    }
+
+                    Write-Host "Invalid username. It cannot be empty or contain spaces or special characters."
+                }
+
+                $adminPass = Read-Host "Enter password (will be used to create local admin account)" -AsSecureString
             }
         }
-
-        $adminPass = $null
-        if ($isWindows) {
-            $adminPass = Read-Host "Enter password (will be used to create local admin account)" -AsSecureString
-        }
         else {
-            $pw = Read-Host "Enter password or leave blank to configure SSH later"
+            if ($adminUserEnv -and $adminUserEnv -ne "") {
+                $adminUser = $adminUserEnv
+            }
+            else {
+                $adminUser = Read-Host ("Enter admin username for Linux VM " + $vmName)
+            }
+
+            $pw = $adminPassEnv
+            if (-not $pw -or $pw -eq "") {
+                $pw = Read-Host "Enter password or leave blank to configure SSH later"
+            }
+
             if ($pw -ne "") {
                 $adminPass = ConvertTo-SecureString $pw -AsPlainText -Force
             }
         }
 
-        $vmSize = "Standard_D2s_v3"
+        $vmSize  = "Standard_D2s_v3"
         $vmConfig = New-AzVMConfig -VMName $vmName -VMSize $vmSize
 
         if ($imageObj -and $imageObj.Publisher -and $imageObj.Offer -and $imageObj.Sku) {
@@ -647,16 +727,15 @@ try {
 
         $vmConfig = Add-AzVMNetworkInterface -VM $vmConfig -Id $nic.Id
 
-        # Boot diagnostics storage account
         if ($useStorageAccount -and $sa -ne $null) {
             $cmd = Get-Command -Name Set-AzVMBootDiagnostics -ErrorAction SilentlyContinue
             if ($cmd) {
                 try {
                     $vmConfig = Set-AzVMBootDiagnostics -VM $vmConfig -ResourceGroupName $storageAccountRG -StorageAccountName $storageAccountName -Enable -ErrorAction Stop
-                    Write-Host "Using provided storage account for boot diagnostics via Set-AzVMBootDiagnostics:" $storageAccountName
+                    Write-Host "Using provided storage account for boot diagnostics via Set-AzVMBootDiagnostics: $storageAccountName"
                 }
                 catch {
-                    Write-Host "Warning: Failed to attach provided storage account via Set-AzVMBootDiagnostics. Error:" $_
+                    Write-Host "Warning: Failed to attach provided storage account via Set-AzVMBootDiagnostics. Error: $_"
                     throw "Cannot attach provided storage account to VM config. Aborting to avoid auto-creation."
                 }
             }
@@ -689,10 +768,10 @@ try {
 
                     $vmConfig.DiagnosticsProfile = $diagProf
 
-                    Write-Host "Using provided storage account for boot diagnostics via DiagnosticsProfile StorageUri:" $blobUri
+                    Write-Host "Using provided storage account for boot diagnostics via DiagnosticsProfile StorageUri: $blobUri"
                 }
                 catch {
-                    Write-Host "Warning: Fallback attaching storage account for boot diagnostics failed. Error:" $_
+                    Write-Host "Warning: Fallback attaching storage account for boot diagnostics failed. Error: $_"
                     throw "Cannot attach provided storage account to VM config. Aborting to avoid auto-creation."
                 }
             }
@@ -707,10 +786,11 @@ try {
         }
         catch {}
 
-        Write-Host "Creating VM" $vmName "in RG" $targetRG "Location:" $targetLocation
+        Write-Host ("Creating VM " + $vmName + " in RG " + $targetRG + " (Location: " + $targetLocation + ") ...")
+
         try {
             New-AzVM -ResourceGroupName $targetRG -Location $targetLocation -VM $vmConfig -ErrorAction Stop
-            Write-Host "VM" $vmName "created."
+            Write-Host ("VM " + $vmName + " created.")
         }
         catch {
             if ($_.Exception -and ($_.Exception.Message -match "SkuNotAvailable" -or $_.Exception.Message -match "Capacity Restrictions")) {

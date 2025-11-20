@@ -5,16 +5,6 @@ param(
     [string]$Mode     = ""
 )
 
-function Get-MigInput {
-    param(
-        [string]$EnvName,
-        [string]$Prompt
-    )
-    $val = $env:$EnvName
-    if ($val -and $val -ne "") { return $val }
-    return Read-Host $Prompt
-}
-
 function Read-DiscoveryFile {
     param([string]$path)
     $text = Get-Content -Raw -Path $path
@@ -180,7 +170,10 @@ try {
             if ($pr.PSObject.Properties.Match('displayName') -and $pr.displayName) { $cands += $pr.displayName }
         }
 
-        $cands = $cands | Where-Object { $_ -and $_.ToString().Trim() -ne "" } | ForEach-Object { $_.ToString().Trim() } | Sort-Object -Unique
+        $cands = $cands |
+            Where-Object { $_ -and $_.ToString().Trim() -ne "" } |
+            ForEach-Object { $_.ToString().Trim() } |
+            Sort-Object -Unique
 
         $matchesCsv = $false
         foreach ($cand in $cands) {
@@ -249,16 +242,11 @@ try {
     if ($storageAccountName -and $storageAccountName -ne "") {
         try {
             $sa = Get-AzStorageAccount -ResourceGroupName $storageAccountRG -Name $storageAccountName -ErrorAction Stop
-            if ($sa.Sku.Name -notmatch "Standard" -or ($sa.Kind -ne "StorageV2" -and $sa.Kind -ne "Storage")) {
-                Write-Host ("Warning: Storage account $storageAccountName found but SKU or Kind may be incompatible. Kind: " + $sa.Kind + " Sku: " + $sa.Sku.Name)
-                # by default continue (CSV is explicit). If you prefer strict, set MIG_NONINTERACTIVE true to fail.
-            }
             $useStorageAccount = $true
-            Write-Host "Using provided storage account: $storageAccountName in RG $storageAccountRG"
+            Write-Host ("Using provided storage account: " + $storageAccountName + " in RG " + $storageAccountRG)
         }
         catch {
-            Write-Host ("Warning: storage account $storageAccountName in RG $storageAccountRG not found or not accessible. Script may attempt to create one.")
-            # we'll create when needed
+            Write-Host ("Warning: storage account " + $storageAccountName + " in RG " + $storageAccountRG + " not found or not accessible. Script may attempt to create one.")
         }
     }
 
@@ -287,7 +275,6 @@ try {
 
     $effectiveMode = $Mode
     if (-not $effectiveMode -or $effectiveMode -eq "") {
-        # check env override (MIG_MODE) or ask
         if ($env:MIG_MODE -and $env:MIG_MODE -ne "") { $effectiveMode = $env:MIG_MODE }
         else {
             $choice = Read-Host "Enter mode (DryRun or Replicate). Default DryRun"
@@ -390,14 +377,13 @@ try {
             if ($cmd) {
                 try {
                     $vmConfig = Set-AzVMBootDiagnostics -VM $vmConfig -ResourceGroupName $storageAccountRG -StorageAccountName $storageAccountName -Enable -ErrorAction Stop
-                    Write-Host ("Using provided storage account $storageAccountName for boot diagnostics")
+                    Write-Host ("Using provided storage account " + $storageAccountName + " for boot diagnostics")
                 }
                 catch {
                     Write-Host ("Warning: Failed to attach provided storage account via Set-AzVMBootDiagnostics: " + $_.ToString())
                 }
             }
             else {
-                # fallback: set DiagnosticsProfile StorageUri if available
                 if ($sa.PrimaryEndpoints -and $sa.PrimaryEndpoints.Blob) {
                     $blobUri = $sa.PrimaryEndpoints.Blob
                     $bootDiag = New-Object -TypeName PSCustomObject
@@ -410,7 +396,6 @@ try {
             }
         }
         else {
-            # attempt to create a storage account if one was requested in CSV but not found
             if ($storageAccountName -and $storageAccountName -ne "") {
                 Write-Host ("Creating storage account " + $storageAccountName + " in RG " + $storageAccountRG + " (location " + $targetLocation + ") for boot diagnostics")
                 try {
@@ -432,7 +417,7 @@ try {
             }
         }
 
-        Write-Host ("Creating VM " + $vmName + " in RG " + $targetRG + " ...")
+        Write-Host ("Creating VM " + $vmName + " in RG " + $targetRG + " (Location: " + $targetLocation + ") ...")
         try {
             New-AzVM -ResourceGroupName $targetRG -Location $targetLocation -VM $vmConfig -ErrorAction Stop
             Write-Host ("VM " + $vmName + " created.")

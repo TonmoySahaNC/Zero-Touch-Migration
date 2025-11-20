@@ -1,13 +1,3 @@
-function Get-MigInput {
-    param(
-        [string]$EnvName,
-        [string]$Prompt
-    )
-    $val = $env:$EnvName
-    if ($val -and $val -ne "") { return $val }
-    return Read-Host $Prompt
-}
-
 param(
     [string]$TokenFile    = ".\token.enc",
     [string]$InputCsv     = ".\migration_input.csv",
@@ -168,7 +158,10 @@ try {
             if ($p.PSObject.Properties.Match('displayName') -and $p.displayName) { $nameCandidates += $p.displayName }
         }
 
-        $nameCandidates = $nameCandidates | Where-Object { $_ -and $_.ToString().Trim() -ne "" } | ForEach-Object { $_.ToString().Trim() } | Sort-Object -Unique
+        $nameCandidates = $nameCandidates |
+            Where-Object { $_ -and $_.ToString().Trim() -ne "" } |
+            ForEach-Object { $_.ToString().Trim() } |
+            Sort-Object -Unique
 
         $matched = $false
         foreach ($cand in $nameCandidates) {

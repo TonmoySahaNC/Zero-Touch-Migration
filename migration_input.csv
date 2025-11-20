@@ -1,0 +1,3 @@
+MigrationType,SrcSubscriptionId,SrcResourceGroup,MigrationProjectName,TgtSubscriptionId,TgtResourceGroup,TgtVNet,TgtSubnet,TgtLocation,BootDiagStorageAccountName,BootDiagStorageAccountRG,AdminUsername,AdminPassword,VMName
+Physical,a29ddc5a-4b68-48f0-8042-1fa28daccffc,ZTM-Source-SDC,ZTM-POC,a29ddc5a-4b68-48f0-8042-1fa28daccffc,ZTM-Target-SDC,VNET-HCEZTM-Target-01,Subnet-HCEZTM-Target-01,swedencentral,ztmtargetsdcboot,ZTM-Target-SDC,azureadmin,Welcome@123456,VMAPP11
+Physical,a29ddc5a-4b68-48f0-8042-1fa28daccffc,ZTM-Source-SDC,ZTM-POC,a29ddc5a-4b68-48f0-8042-1fa28daccffc,ZTM-Target-SDC,VNET-HCEZTM-Target-01,Subnet-HCEZTM-Target-01,swedencentral,ztmtargetsdcboot,ZTM-Target-SDC,azureadmin,Welcome@123456,VMAPP12

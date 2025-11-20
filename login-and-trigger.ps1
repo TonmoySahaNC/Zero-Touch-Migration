@@ -1,7 +1,9 @@
 param(
     [switch]$UseServicePrincipal,
     [string]$TokenFile = ".\token.enc",
-    [string]$Script2   = ".\select-migration-type.ps1"
+    [string]$InputCsv   = ".\migration_input.csv",
+    [string]$Script2    = ".\select-migration-type.ps1",
+    [string]$Mode       = ""   # optional override: "DryRun" or "Replicate"
 )
 
 try {
@@ -46,14 +48,23 @@ try {
 
     Write-Host "Encrypted token saved to $TokenFile"
 
+    if (-not (Test-Path $InputCsv)) {
+        throw "Input CSV not found: $InputCsv"
+    }
+
     if (-not (Test-Path $Script2)) {
         throw "Next script not found: $Script2"
     }
 
     Write-Host "Calling next script"
-    & $Script2 -TokenFile $TokenFile
+    if ($Mode -and $Mode -ne "") {
+        & $Script2 -TokenFile $TokenFile -InputCsv $InputCsv -Mode $Mode
+    }
+    else {
+        & $Script2 -TokenFile $TokenFile -InputCsv $InputCsv
+    }
 }
 catch {
-    Write-Error ("Fatal error in login-and-trigger: " + $_)
+    Write-Error ("Fatal error in login-and-trigger: " + $_.ToString())
     exit 1
 }

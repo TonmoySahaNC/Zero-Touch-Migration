@@ -1,107 +1,40 @@
-name: ZTM Physical Migration
+name: ZTM CSV-driven Migration
 
 on:
   workflow_dispatch:
     inputs:
-      SRC_SUBSCRIPTION_ID:
-        description: "Source (migration project) subscription ID"
+      DRY_RUN:
+        description: 'true for dry-run (no real create). false to perform replication.'
         required: true
-      SRC_RG:
-        description: "Migration project resource group"
-        required: true
-      MIG_PROJECT_NAME:
-        description: "Azure Migrate project name"
-        required: true
-
-      MODE:
-        description: "DryRun or Replicate"
-        required: true
-        default: "DryRun"
-
-      TGT_SUBSCRIPTION_ID:
-        description: "Target subscription ID"
-        required: true
-      TGT_RG:
-        description: "Target resource group"
-        required: true
-      TGT_VNET:
-        description: "Target VNet name"
-        required: true
-      TGT_SUBNET:
-        description: "Target subnet name"
-        required: true
-      TGT_LOCATION:
-        description: "Target location (e.g. swedencentral)"
-        required: true
-
-      BOOTDIAG_SA_NAME:
-        description: "Existing storage account for boot diagnostics"
-        required: true
-      BOOTDIAG_SA_RG:
-        description: "Resource group of that storage account"
-        required: true
-
-      ADMIN_USERNAME:
-        description: "Local admin username for all VMs"
-        required: true
-      ADMIN_PASSWORD:
-        description: "Local admin password for all VMs"
-        required: true
-
-      CONFIRM_REPLICATION:
-        description: "Y to start replication after DryRun"
-        required: true
-        default: "Y"
+        default: 'true'
 
 jobs:
   migrate:
     runs-on: windows-latest
-
     env:
-      # Service principal auth (your secrets)
-      AZURE_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
-
-      # Make scripts use SP and non-interactive inputs
+      AZURE_TENANT_ID:     ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID:     ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       USE_SERVICE_PRINCIPAL: "true"
       MIG_NONINTERACTIVE:    "true"
-
-      # Source migrate project
-      MIG_SRC_SUBSCRIPTION_ID: ${{ inputs.SRC_SUBSCRIPTION_ID }}
-      MIG_SRC_RG:              ${{ inputs.SRC_RG }}
-      MIG_PROJECT_NAME:        ${{ inputs.MIG_PROJECT_NAME }}
-
-      # Mode
-      MIG_MODE:                ${{ inputs.MODE }}
-      MIG_CONFIRM_REPLICATION: ${{ inputs.CONFIRM_REPLICATION }}
-
-      # Target settings
-      MIG_TGT_SUBSCRIPTION_ID: ${{ inputs.TGT_SUBSCRIPTION_ID }}
-      MIG_TGT_RG:              ${{ inputs.TGT_RG }}
-      MIG_TGT_VNET:            ${{ inputs.TGT_VNET }}
-      MIG_TGT_SUBNET:          ${{ inputs.TGT_SUBNET }}
-      MIG_TGT_LOCATION:        ${{ inputs.TGT_LOCATION }}
-
-      MIG_TGT_BOOTDIAG_SA_NAME: ${{ inputs.BOOTDIAG_SA_NAME }}
-      MIG_TGT_BOOTDIAG_SA_RG:   ${{ inputs.BOOTDIAG_SA_RG }}
-
-      # VM admin creds
-      MIG_ADMIN_USERNAME:       ${{ inputs.ADMIN_USERNAME }}
-      MIG_ADMIN_PASSWORD:       ${{ inputs.ADMIN_PASSWORD }}
+      # Path to CSV in repo (change if stored elsewhere)
+      MIG_INPUT_CSV: "./migration_input.csv"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install Az PowerShell modules
+      - name: Install Az PowerShell
         shell: pwsh
         run: |
           Install-Module Az -Scope CurrentUser -Force -AllowClobber
           Import-Module Az.Accounts,Az.Resources,Az.Compute,Az.Network,Az.Storage
 
-      - name: Run zero-touch migration
+      - name: Run migration (CSV-driven)
         shell: pwsh
+        env:
+          MIG_MODE: ${{ github.event.inputs.DRY_RUN == 'true' && 'DryRun' || 'Replicate' }}
         run: |
-          cd .\0-touch
-          ./login-and-trigger.ps1 -UseServicePrincipal
+          cd ${{ github.workspace }}
+          # run login-and-trigger using service principal, supply CSV path and Mode
+          .\0-touch\login-and-trigger.ps1 -UseServicePrincipal -InputCsv $env:MIG_INPUT_CSV -Mode $env:MIG_MODE

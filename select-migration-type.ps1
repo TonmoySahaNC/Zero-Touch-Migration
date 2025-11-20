@@ -1,35 +1,43 @@
 param(
     [string]$TokenFile = ".\token.enc",
-    [string]$Script3   = ".\discovery-physical.ps1"
+    [string]$InputCsv  = ".\migration_input.csv",
+    [string]$Script3   = ".\discovery-physical.ps1",
+    [string]$Mode      = ""
 )
+
 try {
-    Write-Host "Select migration type (enter the number)"
-    Write-Host "1) Physical"
-    Write-Host "2) VMware"
-    Write-Host "3) HyperV"
-
-    $choice = Read-Host "Enter number (use 1 for Physical)"
-
-    switch ($choice) {
-        "1" {
-            Write-Host "Physical chosen. Launching discovery..."
-            if (-not (Test-Path $Script3)) {
-                throw "Discovery script not found: $Script3"
-            }
-            & $Script3 -TokenFile $TokenFile
-        }
-        "2" {
-            Write-Host "VMware migration not implemented yet."
-        }
-        "3" {
-            Write-Host "HyperV migration not implemented yet."
-        }
-        default {
-            throw "Invalid selection. Use 1 for Physical."
-        }
+    if (-not (Test-Path $InputCsv)) {
+        throw "Input CSV not found: $InputCsv"
     }
+
+    # read only first row to determine migration type / validate
+    $rows = Import-Csv -Path $InputCsv
+    if ($rows.Count -eq 0) {
+        throw "Input CSV is empty: $InputCsv"
+    }
+
+    $first = $rows[0]
+    $csvMigrationType = $first.MigrationType
+
+    if ($Mode -and $Mode -ne "") {
+        # Mode override: accepts "DryRun" or "Replicate"
+        $modeParam = $Mode
+    }
+    else {
+        $modeParam = ""  # will be used downstream via environment or prompt
+    }
+
+    if (-not $csvMigrationType -or $csvMigrationType.Trim().ToLower() -ne "physical") {
+        throw "Unsupported migration type in CSV. This flow currently supports only 'Physical'. CSV value: '$csvMigrationType'"
+    }
+
+    if (-not (Test-Path $Script3)) {
+        throw "Discovery script not found: $Script3"
+    }
+
+    & $Script3 -TokenFile $TokenFile -InputCsv $InputCsv -Mode $modeParam
 }
 catch {
-    Write-Error ("Fatal error in select-migration-type: " + $_)
+    Write-Error ("Fatal error in select-migration-type: " + $_.ToString())
     exit 1
 }

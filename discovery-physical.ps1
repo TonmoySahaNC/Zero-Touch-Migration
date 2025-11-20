@@ -2,198 +2,237 @@ param(
     [string]$TokenFile    = ".\token.enc",
     [string]$InputCsv     = ".\migration_input.csv",
     [string]$OutputFolder = ".\",
-    [string]$Script4      = ".\replication-run.ps1",
-    [string]$Mode         = ""
+    [string]$Script4      = ".\replication-run.ps1"
 )
+
+function Get-Field {
+    param(
+        [object]$Row,
+        [string[]]$Names
+    )
+    foreach ($n in $Names) {
+        if ($Row.PSObject.Properties.Name -contains $n) {
+            $val = $Row.$n
+            if ($null -ne $val) {
+                $s = $val.ToString().Trim()
+                if ($s -ne "") { return $s }
+            }
+        }
+    }
+    return ""
+}
 
 try {
     if (-not (Test-Path $InputCsv)) {
-        throw "Input CSV not found: $InputCsv"
+        throw ("Input CSV file not found: " + $InputCsv)
     }
 
-    $rows = Import-Csv -Path $InputCsv
-    if ($rows.Count -eq 0) {
-        throw "Input CSV is empty: $InputCsv"
+    $csvRows = Import-Csv -Path $InputCsv
+    if (-not $csvRows -or $csvRows.Count -eq 0) {
+        throw "Input CSV has no data."
     }
 
-    # take global settings from the first row
-    $first = $rows[0]
-
-    $srcSubscriptionId = $first.SrcSubscriptionId
-    $srcRG             = $first.SrcResourceGroup
-    $projectName       = $first.MigrationProjectName
-
-    if (-not $srcSubscriptionId -or -not $srcRG -or -not $projectName) {
-        throw "Missing source subscription / resource-group / project name in CSV first row."
-    }
-
-    # gather VM names to include (case-insensitive)
-    $vmNames = @()
-    foreach ($r in $rows) {
-        if ($r.VMName -and $r.VMName.Trim() -ne "") {
-            $vmNames += $r.VMName.Trim()
+    # Only care about rows where MigrationType = Physical
+    $physicalRows = @()
+    foreach ($row in $csvRows) {
+        $mt = ""
+        if ($row.PSObject.Properties.Name -contains "MigrationType" -and $row.MigrationType) {
+            $mt = $row.MigrationType.ToString().Trim().ToLower()
         }
+        if ($mt -eq "physical") { $physicalRows += $row }
     }
-    $vmNames = $vmNames | ForEach-Object { $_.ToLower() } | Sort-Object -Unique
 
-    Write-Host ("Setting subscription context to " + $srcSubscriptionId)
-    Set-AzContext -Subscription $srcSubscriptionId -ErrorAction Stop
+    if ($physicalRows.Count -eq 0) {
+        throw "No rows with MigrationType 'Physical' found in CSV."
+    }
 
-    # find migrate project resource
-    $projResources = Get-AzResource -ResourceGroupName $srcRG -ResourceName $projectName -ErrorAction SilentlyContinue
+    # Source info from first Physical row (supports old/new headers)
+    $first = $physicalRows[0]
+
+    $sourceSubId = Get-Field -Row $first -Names @("SourceSubscriptionId","SrcSubscriptionId","SourceSubId")
+    $sourceRG    = Get-Field -Row $first -Names @("SourceResourceGroup","SrcResourceGroup","SourceRG")
+    $projectName = Get-Field -Row $first -Names @("MigrateProjectName","MigrationProjectName","AzureMigrateProjectName")
+
+    if ($sourceSubId -eq "" -or $sourceRG -eq "" -or $projectName -eq "") {
+        throw "SourceSubscriptionId/SrcSubscriptionId, SourceResourceGroup/SrcResourceGroup, or MigrateProjectName/MigrationProjectName missing in CSV."
+    }
+
+    Write-Host ("Setting subscription context to " + $sourceSubId)
+    Set-AzContext -Subscription $sourceSubId -ErrorAction Stop
+
+    # Find Azure Migrate project
+    $projResources = Get-AzResource -ResourceGroupName $sourceRG -ResourceName $projectName -ErrorAction SilentlyContinue
+
     if (-not $projResources) {
-        $projResources = Get-AzResource -ResourceGroupName $srcRG -ErrorAction Stop |
+        $projResources = Get-AzResource -ResourceGroupName $sourceRG -ErrorAction Stop |
             Where-Object { $_.ResourceType -like "Microsoft.Migrate/*" -and $_.Name -eq $projectName }
     }
+
     if (-not $projResources) {
-        throw ("Could not find migration project named " + $projectName + " in RG " + $srcRG)
+        throw ("Could not find a Microsoft.Migrate project named " + $projectName + " in RG " + $sourceRG + ".")
     }
 
     $proj = $projResources[0]
     Write-Host ("Found project: " + $proj.Name + " [" + $proj.ResourceType + "]")
 
+    # Build API path for machines
+    $apiPath = ""
     if ($proj.ResourceType -ieq "Microsoft.Migrate/migrateprojects") {
-        $apiPath = "/subscriptions/$srcSubscriptionId/resourceGroups/$srcRG/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
-    }
-    elseif ($proj.ResourceType -ieq "Microsoft.Migrate/assessmentProjects") {
-        $apiPath = "/subscriptions/$srcSubscriptionId/resourceGroups/$srcRG/providers/Microsoft.Migrate/assessmentProjects/$projectName/machines?api-version=2019-10-01"
-    }
-    else {
-        $apiPath = "/subscriptions/$srcSubscriptionId/resourceGroups/$srcRG/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
+        $apiPath = "/subscriptions/" + $sourceSubId + "/resourceGroups/" + $sourceRG + "/providers/Microsoft.Migrate/migrateProjects/" + $projectName + "/machines?api-version=2018-09-01-preview"
+    } elseif ($proj.ResourceType -ieq "Microsoft.Migrate/assessmentProjects") {
+        $apiPath = "/subscriptions/" + $sourceSubId + "/resourceGroups/" + $sourceRG + "/providers/Microsoft.Migrate/assessmentProjects/" + $projectName + "/machines?api-version=2019-10-01"
+    } else {
+        $apiPath = "/subscriptions/" + $sourceSubId + "/resourceGroups/" + $sourceRG + "/providers/Microsoft.Migrate/migrateProjects/" + $projectName + "/machines?api-version=2018-09-01-preview"
     }
 
     Write-Host "Calling Azure Migrate API:"
-    Write-Host "  $apiPath"
+    Write-Host ("  " + $apiPath)
 
     $allMachines = @()
     $next = $apiPath
 
     while ($next) {
-        $resp = Invoke-AzRest -Path $next -Method GET -ErrorAction Stop
-        $body = $resp.Content | ConvertFrom-Json
+        $resp     = Invoke-AzRest -Path $next -Method GET -ErrorAction Stop
+        $bodyText = $resp.Content
+        $body     = $bodyText | ConvertFrom-Json
 
         if ($null -ne $body.value) {
             $allMachines += $body.value
-        }
-        elseif ($body -is [System.Array]) {
+        } elseif ($body -is [System.Array]) {
             $allMachines += $body
-        }
-        else {
+        } else {
             $allMachines += ,$body
         }
 
         $nextLink = $null
-        if ($body.nextLink) { $nextLink = $body.nextLink }
-        elseif ($body.'@odata.nextLink') { $nextLink = $body.'@odata.nextLink' }
+        if ($body.PSObject.Properties.Name -contains "nextLink" -and $body.nextLink) {
+            $nextLink = $body.nextLink
+        } elseif ($body.PSObject.Properties.Name -contains "@odata.nextLink" -and $body.'@odata.nextLink') {
+            $nextLink = $body.'@odata.nextLink'
+        }
 
         if ($nextLink) { $next = $nextLink } else { $next = $null }
     }
 
     if ($allMachines.Count -eq 0) {
-        throw "Discovery produced zero machines from Azure Migrate."
+        throw "Discovery produced zero machines from Azure Migrate project. Check appliance and access."
     }
 
-    # helper to pick latest discovery entry and normalise names/os
-    function Get-LatestDiscoveryData {
-        param($rawObj)
-        if ($null -eq $rawObj) { return $null }
+    # Helper to choose best discoveryData entry
+    function Get-BestDiscoveryEntry {
+        param([object]$props)
 
-        $out = [PSCustomObject]@{ machineName = $null; displayName = $null; osName = $null; osType = $null; discovery = $null }
+        if (-not $props) { return $null }
 
-        # properties may be in .properties or top-level
-        $props = $null
-        if ($rawObj.PSObject.Properties.Match('properties')) { $props = $rawObj.properties } else { $props = $rawObj }
+        $discArray = $null
+        if ($props.PSObject.Properties.Name -contains "discoveryData" -and $props.discoveryData) {
+            $discArray = $props.discoveryData
+        }
 
-        if ($props -ne $null) {
-            if ($props.PSObject.Properties.Match('name') -and $props.name) { $out.machineName = $props.name }
-            if ($props.PSObject.Properties.Match('displayName') -and $props.displayName) { $out.displayName = $props.displayName }
-            if ($props.PSObject.Properties.Match('osName') -and $props.osName) { $out.osName = $props.osName }
-            if ($props.PSObject.Properties.Match('operatingSystem') -and $props.operatingSystem) { $out.osName = $props.operatingSystem }
-            if ($props.PSObject.Properties.Match('osType') -and $props.osType) { $out.osType = $props.osType }
-            if ($props.PSObject.Properties.Match('discoveryData') -and $props.discoveryData) {
-                $arr = $props.discoveryData
-                # pick most recent by lastUpdatedTime or enqueueTime if present
-                if ($arr -is [System.Array]) {
-                    $best = $null
-                    $bestDt = [DateTime]::MinValue
-                    foreach ($e in $arr) {
-                        $dt = [DateTime]::MinValue
-                        try {
-                            if ($e.PSObject.Properties.Match('lastUpdatedTime') -and $e.lastUpdatedTime) { $dt = [DateTime]::Parse($e.lastUpdatedTime) }
-                            elseif ($e.PSObject.Properties.Match('enqueueTime') -and $e.enqueueTime) { $dt = [DateTime]::Parse($e.enqueueTime) }
-                        } catch {}
-                        if ($dt -gt $bestDt) { $bestDt = $dt; $best = $e }
-                    }
-                    if ($best -ne $null) {
-                        if ($best.PSObject.Properties.Match('machineName') -and $best.machineName) { $out.machineName = $best.machineName }
-                        if ($best.PSObject.Properties.Match('osName') -and $best.osName) { $out.osName = $best.osName }
-                        $out.discovery = $best
-                    }
-                }
-                else {
-                    $single = $arr
-                    if ($single.PSObject.Properties.Match('machineName') -and $single.machineName) { $out.machineName = $single.machineName }
-                    if ($single.PSObject.Properties.Match('osName') -and $single.osName) { $out.osName = $single.osName }
-                    $out.discovery = $single
+        if (-not $discArray) { return $null }
+
+        $chosen = $null
+        foreach ($d in $discArray) {
+            if ($d.PSObject.Properties.Name -contains "solutionName" -and $d.solutionName) {
+                $sn = $d.solutionName.ToString()
+                if ($sn -like "*Servers-Discovery*") {
+                    $chosen = $d
                 }
             }
         }
 
-        return $out
+        if ($null -eq $chosen) {
+            $chosen = $discArray[0]
+        }
+
+        return $chosen
     }
 
-    # normalize, then filter by vmNames
+    # Normalize ALL machines, dedupe by VM name (machineName)
     $normalized = @()
+    $seenVM = @{}
+
     foreach ($m in $allMachines) {
-        $ld = Get-LatestDiscoveryData -rawObj $m
-
-        $nameCandidates = @()
-        if ($ld.machineName) { $nameCandidates += $ld.machineName }
-        if ($ld.displayName) { $nameCandidates += $ld.displayName }
-        # also attempt top-level fields
-        if ($m.PSObject.Properties.Match('name') -and $m.name) { $nameCandidates += $m.name }
-        if ($m.PSObject.Properties.Match('properties') -and $m.properties) {
-            $p = $m.properties
-            if ($p.PSObject.Properties.Match('machineName') -and $p.machineName) { $nameCandidates += $p.machineName }
-            if ($p.PSObject.Properties.Match('displayName') -and $p.displayName) { $nameCandidates += $p.displayName }
+        $props = $null
+        if ($m.PSObject.Properties.Name -contains "properties" -and $m.properties) {
+            $props = $m.properties
         }
 
-        $nameCandidates = $nameCandidates |
-            Where-Object { $_ -and $_.ToString().Trim() -ne "" } |
-            ForEach-Object { $_.ToString().Trim() } |
-            Sort-Object -Unique
+        $disc = Get-BestDiscoveryEntry -props $props
+        if (-not $disc) { continue }
 
-        $matched = $false
-        foreach ($cand in $nameCandidates) {
-            if ($vmNames -contains $cand.ToLower()) { $matched = $true; break }
+        $vmName = ""
+        if ($disc.PSObject.Properties.Name -contains "machineName" -and $disc.machineName) {
+            $vmName = $disc.machineName.ToString()
         }
 
-        if ($matched) {
-            $obj = [PSCustomObject]@{
-                MachineName = ($nameCandidates | Select-Object -First 1)
-                OS          = ($ld.osName -or $ld.osType -or "UNKNOWN")
-                Raw         = $m
+        if ([string]::IsNullOrWhiteSpace($vmName)) {
+            if ($m.PSObject.Properties.Name -contains "name" -and $m.name) {
+                $vmName = $m.name.ToString()
             }
-            $normalized += $obj
+        }
+
+        if ([string]::IsNullOrWhiteSpace($vmName)) {
+            continue
+        }
+
+        if ($seenVM.ContainsKey($vmName)) {
+            continue
+        }
+        $seenVM[$vmName] = $true
+
+        $osName = "UNKNOWN"
+        if ($disc.PSObject.Properties.Name -contains "osName" -and $disc.osName) {
+            $osName = $disc.osName.ToString()
+        }
+
+        $cpuCores = $null
+        $ramGb    = $null
+
+        if ($disc.PSObject.Properties.Name -contains "extendedInfo" -and $disc.extendedInfo) {
+            $ext = $disc.extendedInfo
+            if ($ext.PSObject.Properties.Name -contains "memoryDetails" -and $ext.memoryDetails) {
+                try {
+                    $memObj = $ext.memoryDetails | ConvertFrom-Json
+                    if ($memObj -and $memObj.PSObject.Properties.Name -contains "NumberOfProcessorCore" -and $memObj.NumberOfProcessorCore) {
+                        $cpuCores = [int]$memObj.NumberOfProcessorCore
+                    }
+                    if ($memObj -and $memObj.PSObject.Properties.Name -contains "AllocatedMemoryInMB" -and $memObj.AllocatedMemoryInMB) {
+                        $ramGb = [Math]::Round([double]$memObj.AllocatedMemoryInMB / 1024, 2)
+                    }
+                } catch {
+                    # ignore parse errors
+                }
+            }
+        }
+
+        $normalized += [PSCustomObject]@{
+            MachineName = $vmName
+            OS          = $osName
+            CpuCores    = $cpuCores
+            RamGB       = $ramGb
+            Raw         = $m
         }
     }
 
     if ($normalized.Count -eq 0) {
-        throw "After filtering with CSV VM list, zero machines matched. Check VMName values in CSV versus discovery data."
+        throw "Normalization produced zero entries from Azure Migrate discovery data."
     }
 
     $timestamp = (Get-Date).ToString("yyyyMMddHHmmss")
-    $outFile = Join-Path -Path $OutputFolder -ChildPath ("migration_discovery_filtered_" + $projectName + "_" + $timestamp + ".json")
-    $normalized | ConvertTo-Json -Depth 64 | Out-File -FilePath $outFile -Encoding utf8
+    $outFile   = Join-Path -Path $OutputFolder -ChildPath ("migration_discovery_filtered_" + $projectName + "_" + $timestamp + ".json")
 
-    Write-Host ("Discovery complete. Found " + $normalized.Count + " machines (filtered).")
-    Write-Host "Saved file: $outFile"
+    $normalized | ConvertTo-Json -Depth 50 | Out-File -FilePath $outFile -Encoding utf8
+
+    Write-Host ("Discovery complete. Found " + $normalized.Count + " machines.")
+    Write-Host ("Saved file: " + $outFile)
 
     if (-not (Test-Path $Script4)) {
-        throw ("replication script not found: " + $Script4)
+        throw ("replication script not found at " + $Script4)
     }
 
-    & $Script4 -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv -Mode $Mode
+    Write-Host ("Reading discovery file via replication-run: " + $outFile)
+    & $Script4 -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv
 }
 catch {
     Write-Error ("Fatal error in discovery-physical: " + $_.ToString())

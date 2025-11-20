@@ -20,7 +20,6 @@ try {
         $spCred       = New-Object System.Management.Automation.PSCredential($clientId, $secureSecret)
 
         Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $spCred -ErrorAction Stop
-
         Write-Host "Connected using service principal."
     }
     else {
@@ -45,7 +44,7 @@ try {
     )
     [System.IO.File]::WriteAllBytes($TokenFile, $protected)
 
-    Write-Host "Encrypted token saved to" $TokenFile
+    Write-Host "Encrypted token saved to $TokenFile"
 
     if (-not (Test-Path $Script2)) {
         throw "Next script not found: $Script2"

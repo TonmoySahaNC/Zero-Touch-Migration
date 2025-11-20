@@ -1,3 +1,17 @@
+function Get-MigInput {
+    param(
+        [string]$EnvName,
+        [string]$Prompt
+    )
+
+    $val = $env:$EnvName
+    if ($val -and $val -ne "") {
+        return $val
+    }
+
+    return Read-Host $Prompt
+}
+
 param(
     [string]$TokenFile    = ".\token.enc",
     [string]$OutputFolder = ".\",
@@ -5,11 +19,11 @@ param(
 )
 
 try {
-    $subscriptionId = Read-Host "Enter subscription id for migration project"
-    $rg             = Read-Host "Enter resource group name that contains the migration project"
-    $projectName    = Read-Host "Enter migration project name"
+    $subscriptionId = Get-MigInput -EnvName "MIG_SRC_SUBSCRIPTION_ID" -Prompt "Enter subscription id for migration project"
+    $rg             = Get-MigInput -EnvName "MIG_SRC_RG"              -Prompt "Enter resource group name that contains the migration project"
+    $projectName    = Get-MigInput -EnvName "MIG_PROJECT_NAME"        -Prompt "Enter migration project name"
 
-    Write-Host "Setting subscription context to" $subscriptionId
+    Write-Host "Setting subscription context to $subscriptionId"
     Set-AzContext -Subscription $subscriptionId -ErrorAction Stop
 
     $projResources = Get-AzResource -ResourceGroupName $rg -ResourceName $projectName -ErrorAction SilentlyContinue
@@ -24,7 +38,7 @@ try {
     }
 
     $proj = $projResources[0]
-    Write-Host "Found project:" $proj.Name "[" $proj.ResourceType "]"
+    Write-Host ("Found project: " + $proj.Name + " [" + $proj.ResourceType + "]")
 
     if ($proj.ResourceType -ieq "Microsoft.Migrate/migrateprojects") {
         $apiPath = "/subscriptions/$subscriptionId/resourceGroups/$rg/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
@@ -37,7 +51,7 @@ try {
     }
 
     Write-Host "Calling Azure Migrate API:"
-    Write-Host " " $apiPath
+    Write-Host "  $apiPath"
 
     $allMachines = @()
     $next = $apiPath
@@ -88,21 +102,25 @@ try {
             $props = $m
         }
 
-        $machineName = ""
+        $machineName = $null
         if ($props -ne $null) {
             if ($props.PSObject.Properties.Match('name') -and $props.name) {
                 $machineName = $props.name
             }
-            if (-not $machineName -and $props.PSObject.Properties.Match('displayName') -and $props.displayName) {
+            elseif ($props.PSObject.Properties.Match('displayName') -and $props.displayName) {
                 $machineName = $props.displayName
             }
-            if (-not $machineName -and $props.PSObject.Properties.Match('machineName') -and $props.machineName) {
+            elseif ($props.PSObject.Properties.Match('machineName') -and $props.machineName) {
                 $machineName = $props.machineName
             }
         }
 
         if (-not $machineName -and $m.PSObject.Properties.Match('name') -and $m.name) {
             $machineName = $m.name
+        }
+
+        if (-not $machineName) {
+            $machineName = "vm-" + ([guid]::NewGuid().ToString("N").Substring(0,8))
         }
 
         $os = ""
@@ -118,11 +136,16 @@ try {
             }
         }
 
+        if (-not $os) {
+            $os = "UNKNOWN"
+        }
+
         $obj = [PSCustomObject]@{
             MachineName = $machineName
             OS          = $os
             Raw         = $m
         }
+
         $normalized += $obj
     }
 
@@ -132,8 +155,8 @@ try {
 
     $normalized | ConvertTo-Json -Depth 64 | Out-File -FilePath $outFile -Encoding utf8
 
-    Write-Host "Discovery complete. Found" $normalized.Count "machines."
-    Write-Host "Saved file:" $outFile
+    Write-Host ("Discovery complete. Found " + $normalized.Count + " machines.")
+    Write-Host "Saved file: $outFile"
 
     if (-not (Test-Path $Script4)) {
         throw ("replication script not found: " + $Script4)

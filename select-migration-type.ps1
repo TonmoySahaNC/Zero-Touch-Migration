@@ -2,7 +2,6 @@ param(
     [string]$TokenFile = ".\token.enc",
     [string]$Script3   = ".\discovery-physical.ps1"
 )
-
 try {
     Write-Host "Select migration type (enter the number)"
     Write-Host "1) Physical"

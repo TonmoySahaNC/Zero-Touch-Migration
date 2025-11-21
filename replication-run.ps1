@@ -1,6 +1,7 @@
 <#
-  Simple CSV-driven replication for PHYSICAL servers using `az migrate local`.
-  Called from login-and-trigger.ps1
+  CSV-driven replication for PHYSICAL servers using `az migrate local`.
+  - Called from login-and-trigger.ps1
+  - Only MigrationType = Physical is handled
 #>
 
 param(
@@ -11,6 +12,21 @@ param(
 
     [string]$Mode = "DryRun"   # DryRun or Replicate
 )
+
+function Get-Field {
+    param(
+        [object]$Row,
+        [string]$Name
+    )
+    if ($Row -and $Row.PSObject -and $Row.PSObject.Properties.Name -contains $Name) {
+        $v = $Row.$Name
+        if ($null -ne $v) {
+            $s = $v.ToString().Trim()
+            if ($s -ne "") { return $s }
+        }
+    }
+    return ""
+}
 
 try {
     Write-Host "========== replication-run.ps1 (az migrate local) =========="
@@ -42,9 +58,8 @@ try {
 
     foreach ($row in $rows) {
 
-        # Plain, safe reads (no Trim)
-        $migrationType = [string]$row.MigrationType
-        $vmName        = [string]$row.VMName
+        $migrationType = Get-Field $row "MigrationType"
+        $vmName        = Get-Field $row "VMName"
 
         if (-not $vmName) {
             Write-Warning ("Skipping row with no VMName. Raw row: " + ($row | Out-String))
@@ -64,8 +79,8 @@ try {
         }
 
         # Azure Migrate project info
-        $projRG   = [string]$row.SrcResourceGroup
-        $projName = [string]$row.MigrationProjectName
+        $projRG   = Get-Field $row "SrcResourceGroup"
+        $projName = Get-Field $row "MigrationProjectName"
 
         if (-not $projRG -or -not $projName) {
             Write-Warning ("  Project RG/Name missing for " + $vmName + ". Skipping.")
@@ -73,18 +88,19 @@ try {
         }
 
         # Target info
-        $tgtSub    = [string]$row.TgtSubscriptionId
-        $tgtRG     = [string]$row.TgtResourceGroup
-        $tgtVNet   = [string]$row.TgtVNet
-        $tgtSubnet = [string]$row.TgtSubnet
-        $tgtRegion = [string]$row.TgtLocation
+        $tgtSub    = Get-Field $row "TgtSubscriptionId"
+        $tgtRG     = Get-Field $row "TgtResourceGroup"
+        $tgtVNet   = Get-Field $row "TgtVNet"
+        $tgtSubnet = Get-Field $row "TgtSubnet"
+        $tgtRegion = Get-Field $row "TgtLocation"
 
-        $targetVMName = [string]$row.TargetVMName
+        # Target VM name: if CSV has TargetVMName, use it; otherwise fall back to VMName
+        $targetVMName = Get-Field $row "TargetVMName"
         if (-not $targetVMName) { $targetVMName = $vmName }
 
         # Storage / cache
-        $bootDiagSA   = [string]$row.BootDiagStorageAccountName
-        $bootDiagSARG = [string]$row.BootDiagStorageAccountRG
+        $bootDiagSA   = Get-Field $row "BootDiagStorageAccountName"
+        $bootDiagSARG = Get-Field $row "BootDiagStorageAccountRG"
 
         if (-not $tgtSub -or -not $tgtRG -or -not $tgtVNet -or -not $tgtSubnet -or -not $tgtRegion) {
             Write-Warning ("  Target subscription/RG/VNet/Subnet/Region incomplete for " + $vmName + ". Skipping.")

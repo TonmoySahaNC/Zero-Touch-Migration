@@ -4,7 +4,6 @@ param(
     [string]$InputCsv     = ".\migration_input.csv",
     [string]$Mode         = ""
 )
-
 function Get-Field {
     param(
         [object]$Row,

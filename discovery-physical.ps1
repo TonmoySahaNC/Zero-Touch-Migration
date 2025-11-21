@@ -65,7 +65,7 @@ try {
     Write-Host "========== discovery-physical.ps1 =========="
     Write-Host ("InputCsv     : " + $InputCsv)
     Write-Host ("OutputFolder : " + $OutputFolder)
-    Write-Host ("Next script  : " + $Script4)
+    Write-Host ("Next script  : " + $NextScript)
     Write-Host ("Mode         : " + ($Mode ?? ""))
 
     if (-not (Test-Path $InputCsv)) {
@@ -96,16 +96,17 @@ try {
     Write-Host ("Discovery complete. Found " + $normalized.Count + " machines.")
     Write-Host ("Saved file: " + $outFile)
 
-    if (-not (Test-Path $Script4)) {
-        throw ("replication script not found at " + $Script4)
+    if (-not (Test-Path $NextScript)) {
+        throw ("replication script not found at " + $NextScript)
     }
 
     Write-Host ("Reading discovery file via replication-run: " + $outFile)
+
     if ($Mode -and $Mode.Trim() -ne "") {
-        & $Script4 -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv -Mode $Mode
+        & $NextScript -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv -Mode $Mode
     }
     else {
-        & $Script4 -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv
+        & $NextScript -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv
     }
 }
 catch {

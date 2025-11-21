@@ -1,7 +1,6 @@
 <#
   CSV-driven replication for PHYSICAL servers using `az migrate local`.
   - Called from login-and-trigger.ps1
-  - Does NOT depend on discovery-physical.ps1 anymore
 #>
 
 param(
@@ -120,7 +119,7 @@ try {
             "--output","json"
         )
 
-        $discRaw = ""
+        $discRaw = $null
         try {
             $discRaw = az @getDiscArgs 2>&1
         } catch {
@@ -129,17 +128,23 @@ try {
             continue
         }
 
-        if (-not $discRaw -or $discRaw.Trim() -eq "") {
-            Write-Warning ("  No discovered server found for " + $vmName + ". Skipping.")
+        # Force to string before trimming/checking
+        $discRawStr = ""
+        if ($discRaw -ne $null) {
+            $discRawStr = ($discRaw | Out-String)
+        }
+
+        if ([string]::IsNullOrWhiteSpace($discRawStr)) {
+            Write-Warning ("  No discovered server found for " + $vmName + ". Raw output was empty. Skipping.")
             continue
         }
 
         $discObj = $null
         try {
-            $discObj = $discRaw | ConvertFrom-Json
+            $discObj = $discRawStr | ConvertFrom-Json
         } catch {
             Write-Warning "  Failed to parse discovery JSON. Raw:"
-            Write-Warning $discRaw
+            Write-Warning $discRawStr
             continue
         }
 

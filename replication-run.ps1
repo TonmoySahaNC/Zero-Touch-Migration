@@ -37,10 +37,7 @@ function Get-WindowsComputerName {
 
     if ($name -match "^[0-9]+$") {
         $prefix = "WIN"
-        $suffixLength = 12
-        if ($name.Length -lt $suffixLength) {
-            $suffixLength = $name.Length
-        }
+        $suffixLength = [Math]::Min(12, $name.Length)
         $name = $prefix + $name.Substring(0, $suffixLength)
     }
 
@@ -51,17 +48,33 @@ function Get-WindowsComputerName {
     return $name
 }
 
+function Disable-BootDiagnosticsForVmConfig {
+    param(
+        [Parameter(Mandatory = $true)][object]$VmConfig
+    )
+    try {
+        if ($VmConfig.DiagnosticsProfile -and $VmConfig.DiagnosticsProfile.BootDiagnostics) {
+            $VmConfig.DiagnosticsProfile.BootDiagnostics.Enabled    = $false
+            $VmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $null
+        }
+    } catch {
+        # best effort; ignore
+    }
+}
+
 try {
     Import-Module Az.Compute -ErrorAction Stop
     Import-Module Az.Network -ErrorAction Stop
     Import-Module Az.Storage -ErrorAction Stop
 
-    # Detect once whether Set-AzVMBootDiagnostics is available
-    $BootDiagCmd = $null
+    # Detect once whether Set-AzVMBootDiagnostics exists
+    $BootDiagCmdAvailable = $false
     try {
-        $BootDiagCmd = Get-Command -Name Set-AzVMBootDiagnostics -ErrorAction SilentlyContinue
+        if (Get-Command -Name Set-AzVMBootDiagnostics -ErrorAction SilentlyContinue) {
+            $BootDiagCmdAvailable = $true
+        }
     } catch {
-        $BootDiagCmd = $null
+        $BootDiagCmdAvailable = $false
     }
 
     Write-Host ("Reading discovery file: " + $DiscoveryFile)
@@ -69,14 +82,13 @@ try {
         throw ("Discovery file not found: " + $DiscoveryFile)
     }
 
-    $jsonText = Get-Content -Path $DiscoveryFile -Raw
+    $jsonText   = Get-Content -Path $DiscoveryFile -Raw
     $discovered = $jsonText | ConvertFrom-Json
 
     if ($null -eq $discovered) {
         throw "Discovery JSON is null or empty."
     }
 
-    # Ensure we have an array
     if ($discovered -isnot [System.Collections.IEnumerable] -or $discovered -is [string]) {
         $discovered = @($discovered)
     }
@@ -107,7 +119,7 @@ try {
     }
 
     # Build map: VMName -> row (case-insensitive)
-    $vmMap = @{}
+    $vmMap        = @{}
     $allowedNames = @()
     foreach ($row in $physicalRows) {
         $vmName = Get-Field -Row $row -Names @("VMName")
@@ -128,7 +140,7 @@ try {
 
     # Filter discovered machines to only those in CSV VMName
     $machinesToUse = @()
-    $seenNames = @{}
+    $seenNames     = @{}
 
     foreach ($m in $discovered) {
         $mn = ""
@@ -155,7 +167,7 @@ try {
 
     Write-Host ("Loaded " + $discovered.Count + " discovered entries, after CSV filter and dedupe " + $machinesToUse.Count + " machines will be considered.")
 
-    # From first Physical row, get target sub, RG, etc (used as defaults)
+    # Default target settings from first Physical row
     $first = $physicalRows[0]
 
     $defaultTgtSubId  = Get-Field -Row $first -Names @("TgtSubscriptionId","TargetSubscriptionId","TargetSubId")
@@ -175,25 +187,25 @@ try {
     Write-Host ("Setting target subscription context to " + $defaultTgtSubId)
     Set-AzContext -Subscription $defaultTgtSubId -ErrorAction Stop
 
-    # Check if we can connect to storage account (for info; final use is per-VM)
+    # Just an info check for the storage account
     if ($defaultBootSA -ne "" -and $defaultBootSARG -ne "") {
         try {
             $sa = Get-AzStorageAccount -Name $defaultBootSA -ResourceGroupName $defaultBootSARG -ErrorAction Stop
             Write-Host ("Using provided storage account: " + $defaultBootSA + " in RG " + $defaultBootSARG)
         } catch {
-            Write-Warning ("Provided storage account " + $defaultBootSA + " in RG " + $defaultBootSARG + " not found or not accessible. Boot diagnostics may use another storage.")
+            Write-Warning ("Provided storage account " + $defaultBootSA + " in RG " + $defaultBootSARG + " not found or not accessible. Boot diagnostics may be disabled.")
         }
     }
 
-    # DryRun: show MachineName, OS, CPU, RAM, TargetVMExists
+    # ----- DryRun output -----
     Write-Host ""
     Write-Host "===== DryRun Validation ====="
     Write-Host ""
 
     $report = @()
     foreach ($m in $machinesToUse) {
-        $mn = $m.MachineName
-        $os = $m.OS
+        $mn  = $m.MachineName
+        $os  = $m.OS
         $cpu = $null
         $ram = $null
 
@@ -249,12 +261,13 @@ try {
         }
     }
 
+    # ----- Replication -----
     Write-Host ""
     Write-Host "===== Starting Replication ====="
     Write-Host ""
 
     foreach ($m in $machinesToUse) {
-        $mn = $m.MachineName.ToString().Trim()
+        $mn  = $m.MachineName.ToString().Trim()
         $key = $mn.ToUpper()
 
         if (-not $vmMap.ContainsKey($key)) {
@@ -306,8 +319,9 @@ try {
 
         Set-AzContext -Subscription $targetSubId -ErrorAction Stop
 
-        $osName    = ""
-        $isWindows = $true
+        # ----- OS detection (avoid $IsWindows automatic variable) -----
+        $osName      = ""
+        $IsWindowsOS = $true
 
         if ($m.PSObject.Properties.Name -contains "OS" -and $m.OS) {
             $osName = $m.OS.ToString()
@@ -318,9 +332,9 @@ try {
             $osLower -like "*ubuntu*" -or
             $osLower -like "*centos*" -or
             $osLower -like "*red hat*") {
-            $isWindows = $true -eq $false  # force boolean, avoids IsWindows var conflict
+            $IsWindowsOS = $false
         } else {
-            $isWindows = $true
+            $IsWindowsOS = $true
         }
 
         Write-Host ("Processing machine: " + $mn + " (OS: " + $osName + ")")
@@ -349,7 +363,7 @@ try {
 
         # NIC
         $nicName = $mn + "-nic"
-        $nic = $null
+        $nic     = $null
         try {
             $nic = Get-AzNetworkInterface -Name $nicName -ResourceGroupName $targetRG -ErrorAction Stop
             Write-Host ("Using existing NIC: " + $nicName)
@@ -360,14 +374,14 @@ try {
 
         # Admin credential
         $securePass = ConvertTo-SecureString $adminPass -AsPlainText -Force
-        $cred = New-Object System.Management.Automation.PSCredential ($adminUser, $securePass)
+        $cred       = New-Object System.Management.Automation.PSCredential ($adminUser, $securePass)
 
         # Decide OS image based on osName
         $publisher = ""
         $offer     = ""
         $sku       = ""
 
-        if ($isWindows) {
+        if ($IsWindowsOS) {
             $publisher = "MicrosoftWindowsServer"
             $offer     = "WindowsServer"
             $sku       = "2019-datacenter"
@@ -381,11 +395,10 @@ try {
 
         Write-Host ("Selected image: " + $publisher + " / " + $offer + " / " + $sku)
 
-        $vmSize = "Standard_D2s_v3"
-
+        $vmSize  = "Standard_D2s_v3"
         $vmConfig = New-AzVMConfig -VMName $mn -VMSize $vmSize
 
-        if ($isWindows) {
+        if ($IsWindowsOS) {
             $compName = Get-WindowsComputerName -BaseName $mn
             Write-Host ("Using Windows computer name: " + $compName)
             $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows -ComputerName $compName -Credential $cred -ProvisionVMAgent -EnableAutoUpdate
@@ -394,54 +407,30 @@ try {
         }
 
         $vmConfig = Add-AzVMNetworkInterface -VM $vmConfig -Id $nic.Id
-        $vmConfig = Set-AzVMSourceImage -VM $vmConfig -PublisherName $publisher -Offer $offer -Skus $sku -Version "latest"
+        $vmConfig = Set-AzVMSourceImage     -VM $vmConfig -PublisherName $publisher -Offer $offer -Skus $sku -Version "latest"
 
-        # --- BOOT DIAGNOSTICS HANDLING ---
-
-        if ($BootDiagCmd) {
-            # Cmdlet exists (local runs). If a storage account is provided, use it.
-            if ($bootSA -ne "" -and $bootSARG -ne "") {
-                try {
-                    $sa = Get-AzStorageAccount -Name $bootSA -ResourceGroupName $bootSARG -ErrorAction Stop
-                    $bootUri = $sa.PrimaryEndpoints.Blob.ToString()
-                    Write-Host ("Using boot diagnostics storage: " + $bootSA + " in RG " + $bootSARG)
-                    $vmConfig = Set-AzVMBootDiagnostics -VM $vmConfig -Enable -StorageUri $bootUri
-                } catch {
-                    Write-Warning ("Failed to configure boot diagnostics with storage account " + $bootSA + " in RG " + $bootSARG + ". Disabling boot diagnostics.")
-                    try {
-                        if ($vmConfig.DiagnosticsProfile -and $vmConfig.DiagnosticsProfile.BootDiagnostics) {
-                            $vmConfig.DiagnosticsProfile.BootDiagnostics.Enabled    = $false
-                            $vmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $null
-                        }
-                    } catch {}
-                }
-            } else {
-                # Cmdlet exists but no SA specified -> disable to prevent auto-creation
-                Write-Host "No boot diagnostics storage account specified. Disabling boot diagnostics."
-                try {
-                    if ($vmConfig.DiagnosticsProfile -and $vmConfig.DiagnosticsProfile.BootDiagnostics) {
-                        $vmConfig.DiagnosticsProfile.BootDiagnostics.Enabled    = $false
-                        $vmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $null
-                    }
-                } catch {}
+        # ----- Boot diagnostics handling -----
+        if ($BootDiagCmdAvailable -and $bootSA -ne "" -and $bootSARG -ne "") {
+            try {
+                $sa = Get-AzStorageAccount -Name $bootSA -ResourceGroupName $bootSARG -ErrorAction Stop
+                $bootUri = $sa.PrimaryEndpoints.Blob.ToString()
+                Write-Host ("Using boot diagnostics storage: " + $bootSA + " in RG " + $bootSARG)
+                $vmConfig = Set-AzVMBootDiagnostics -VM $vmConfig -Enable -StorageUri $bootUri
+            } catch {
+                Write-Warning ("Failed to configure boot diagnostics with storage account " + $bootSA + " in RG " + $bootSARG + ". Disabling boot diagnostics.")
+                Disable-BootDiagnosticsForVmConfig -VmConfig $vmConfig
             }
         } else {
-            # Cmdlet NOT available (GitHub runner) -> explicitly disable boot diagnostics
-            Write-Host "Set-AzVMBootDiagnostics not available. Disabling boot diagnostics on VM config to avoid auto-created storage accounts."
-            try {
-                if ($vmConfig.DiagnosticsProfile -and $vmConfig.DiagnosticsProfile.BootDiagnostics) {
-                    $vmConfig.DiagnosticsProfile.BootDiagnostics.Enabled    = $false
-                    $vmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $null
-                } else {
-                    $vmConfig.PSObject.Properties.Remove('DiagnosticsProfile') | Out-Null
-                }
-            } catch {}
+            if (-not $BootDiagCmdAvailable) {
+                Write-Host "Set-AzVMBootDiagnostics not available. Disabling boot diagnostics on VM config to avoid auto-created storage accounts."
+            } else {
+                Write-Host "No boot diagnostics storage account specified. Disabling boot diagnostics."
+            }
+            Disable-BootDiagnosticsForVmConfig -VmConfig $vmConfig
         }
 
-        # --- END BOOT DIAGNOSTICS HANDLING ---
-
+        # ----- Create VM -----
         Write-Host ("Creating VM " + $mn + " in RG " + $targetRG + " (Location: " + $location + ") ...")
-
         try {
             New-AzVM -ResourceGroupName $targetRG -Location $location -VM $vmConfig -ErrorAction Stop | Out-Null
             Write-Host ("VM " + $mn + " created.")

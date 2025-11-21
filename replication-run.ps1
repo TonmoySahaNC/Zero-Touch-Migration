@@ -1,8 +1,13 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$InputCsv,                        # e.g. .\migration_input.csv
+    # Passed from discovery-physical.ps1 (and ultimately from login-and-trigger.ps1)
+    [string]$TokenFile = ".\token.enc",
 
-    [string]$Mode = "Replicate"               # or "DryRun"
+    [Parameter(Mandatory = $true)]
+    [string]$DiscoveryFile,                    # .\discovery-output.json
+
+    [string]$InputCsv = ".\migration_input.csv",
+
+    [string]$Mode = ""                         # Replicate / DryRun
 )
 
 function Resolve-Mode {
@@ -18,6 +23,7 @@ function Get-Field {
         [object]$Row,
         [string[]]$Names
     )
+
     foreach ($n in $Names) {
         if ($Row.PSObject.Properties.Name -contains $n) {
             $val = $Row.$n
@@ -31,16 +37,29 @@ function Get-Field {
 }
 
 try {
+    Write-Host "========== replication-run.ps1 (az migrate local) =========="
+
     $modeFinal = Resolve-Mode $Mode
     $modeUpper = $modeFinal.ToUpperInvariant()
 
-    Write-Host "========== replication-run.ps1 (using az migrate local) =========="
-    Write-Host "Mode     : $modeUpper"
-    Write-Host "InputCsv : $InputCsv"
+    Write-Host ("Mode          : " + $modeUpper)
+    Write-Host ("DiscoveryFile : " + $DiscoveryFile)
+    Write-Host ("InputCsv      : " + $InputCsv)
 
+    if (-not (Test-Path $DiscoveryFile)) {
+        throw "Discovery file not found: $DiscoveryFile"
+    }
     if (-not (Test-Path $InputCsv)) {
         throw "Input CSV not found: $InputCsv"
     }
+
+    # Just read discovery file so we can log count, but we're not tightly coupled to it
+    $discContent = Get-Content $DiscoveryFile -Raw | ConvertFrom-Json
+    $discCount   = 0
+    if ($discContent -is [System.Array]) { $discCount = $discContent.Count }
+    elseif ($discContent) { $discCount = 1 }
+
+    Write-Host ("Discovery objects : " + $discCount)
 
     # Make sure az CLI is available
     $az = Get-Command az -ErrorAction SilentlyContinue
@@ -48,22 +67,22 @@ try {
         throw "Azure CLI 'az' not found in PATH. Install Azure CLI and try again."
     }
 
-    # Read CSV
     $rows = Import-Csv -Path $InputCsv
     if (-not $rows -or $rows.Count -eq 0) {
         throw "Input CSV is empty: $InputCsv"
     }
 
-    # This flag ensures we only call 'az migrate local replication init' once per project
+    # Cache per-project initialization for az migrate local replication init (if you decide to use it)
     $initializedProjects = @{}
 
     foreach ($row in $rows) {
+
         $migrationType = Get-Field $row @("MigrationType","Type")
         $mtNorm        = ($migrationType ?? "").ToLowerInvariant()
 
         $vmName        = Get-Field $row @("VMName","MachineName","ServerName")
         if (-not $vmName) {
-            Write-Warning "Row missing VMName/MachineName. Skipping row:`n$($row | Out-String)"
+            Write-Warning "Row missing VMName / MachineName. Skipping row:`n$($row | Out-String)"
             continue
         }
 
@@ -71,11 +90,12 @@ try {
         Write-Host "----- Processing: $vmName -----"
         Write-Host "  MigrationType : $migrationType"
 
-        # Common project info
+        # Azure Migrate project info
         $projRG    = Get-Field $row @("SrcResourceGroup","ProjectRg","MigrationProjectRG")
         $projName  = Get-Field $row @("MigrationProjectName","ProjectName","AzMigrateProjectName")
+
         if (-not $projRG -or -not $projName) {
-            Write-Warning "  Project RG / Name not set in CSV. Skipping $vmName."
+            Write-Warning "  Project RG/Name not set for $vmName. Skipping."
             continue
         }
 
@@ -89,28 +109,27 @@ try {
         $targetVM  = Get-Field $row @("TargetVMName","VMName")
         if (-not $targetVM) { $targetVM = $vmName }
 
-        # Storage account for cache/log/boot diag
+        # Log/cache / boot diag storage
         $bootDiagSAName = Get-Field $row @("BootDiagStorageAccountName","LogStorageAccountName")
         $bootDiagSARG   = Get-Field $row @("BootDiagStorageAccountRG","LogStorageAccountRG")
 
         if (-not $tgtSub -or -not $tgtRG -or -not $tgtVNet -or -not $tgtSubnet -or -not $tgtRegion) {
-            Write-Warning "  Target Subscription/RG/VNet/Subnet/Region not fully set in CSV. Skipping $vmName."
+            Write-Warning "  Target Subscription/RG/VNet/Subnet/Region not fully set. Skipping $vmName."
             continue
         }
 
         if (-not $bootDiagSAName -or -not $bootDiagSARG) {
-            Write-Warning "  BootDiag/Log Storage Account name/RG not set for $vmName. Skipping."
+            Write-Warning "  BootDiag/Log Storage AccountName/RG not set. Skipping $vmName."
             continue
         }
 
         $logStorageId = "/subscriptions/$tgtSub/resourceGroups/$bootDiagSARG/providers/Microsoft.Storage/storageAccounts/$bootDiagSAName"
 
-        # =============================== PHYSICAL ===============================
+        # =============================== PHYSICAL PATH ===============================
         if ($mtNorm -eq "physical") {
+            Write-Host "  [PHYSICAL] Using 'az migrate local' for Azure Migrate project '$projName' (RG: $projRG)."
 
-            Write-Host "  [PHYSICAL] Using az migrate local for Azure Migrate project '$projName' in RG '$projRG'."
-
-            # 1) Confirm the server is discovered
+            # 1) Confirm discovery
             $azArgs = @(
                 "migrate","local","get-discovered-server",
                 "--resource-group",$projRG,
@@ -144,25 +163,27 @@ try {
                 continue
             }
 
-            Write-Host "  [PHYSICAL] Found discovered server in Azure Migrate: $($disc.machineName)"
+            Write-Host "  [PHYSICAL] Found discovered server: $($disc.machineName)"
 
-            # 2) Initialize replication infra once per Project (optional, AzLocal scenario)
+            # 2) (Optional) Initialize replication infra once per project
             $projectKey = "$projRG|$projName"
             if (-not $initializedProjects.ContainsKey($projectKey)) {
 
-                # TODO: Set your appliance name from Azure Migrate portal (Servers -> Migration tools -> Appliances)
-                $sourceApplianceName = "<YOUR_APPLIANCE_NAME>"    # e.g. "migrateapplia"
-                $targetApplianceName = "<YOUR_TARGET_APPLIANCE>"  # often same as source for on-prem->Azure
+                # TODO: Replace with your actual appliance name from Azure Migrate UI (e.g. 'migrateapplia')
+                $sourceApplianceName = "migrateapplia"
+                $targetApplianceName = "migrateapplia"
 
                 if ($modeUpper -eq "DRYRUN") {
-                    Write-Host "  [PHYSICAL][DryRun] Would initialize replication infra with:"
-                    Write-Host "     az migrate local replication init --resource-group $projRG --project-name $projName `"
-                    Write-Host "        --source-appliance-name $sourceApplianceName --target-appliance-name $targetApplianceName `"
-                    Write-Host "        --cache-storage-account-id $logStorageId"
+                    Write-Host "  [PHYSICAL][DryRun] Would initialize replication infra:"
+                    Write-Host "    az migrate local replication init `"
+                    Write-Host "       --resource-group $projRG `"
+                    Write-Host "       --project-name $projName `"
+                    Write-Host "       --source-appliance-name $sourceApplianceName `"
+                    Write-Host "       --target-appliance-name $targetApplianceName `"
+                    Write-Host "       --cache-storage-account-id $logStorageId"
                 }
                 else {
-                    Write-Host "  [PHYSICAL] Initializing az migrate local replication infra for project '$projName' (one-time)..."
-
+                    Write-Host "  [PHYSICAL] Initializing replication infra for project '$projName'..."
                     $initArgs = @(
                         "migrate","local","replication","init",
                         "--resource-group",$projRG,
@@ -171,77 +192,72 @@ try {
                         "--target-appliance-name",$targetApplianceName,
                         "--cache-storage-account-id",$logStorageId
                     )
-
                     try {
                         az @initArgs | Out-Null
                         Write-Host "  [PHYSICAL] Replication infra initialized (or already configured)."
                     } catch {
-                        Write-Warning "  [PHYSICAL] az migrate local replication init failed: $($_.Exception.Message)"
+                        Write-Warning "  [PHYSICAL] 'az migrate local replication init' failed: $($_.Exception.Message)"
                     }
                 }
 
                 $initializedProjects[$projectKey] = $true
             }
 
-            # 3) Enable replication for this server
+            # 3) Start replication for this server
             if ($modeUpper -eq "DRYRUN") {
                 Write-Host "  [PHYSICAL][DryRun] Would now call:"
-                Write-Host "     az migrate local replication new --resource-group $projRG --project-name $projName ..."
-                Write-Host "     (Populate args from 'az migrate local replication new --help' for:"
-                Write-Host "        - source machine (from discovery)"
-                Write-Host "        - target subscription: $tgtSub"
-                Write-Host "        - target RG: $tgtRG"
-                Write-Host "        - target region: $tgtRegion"
-                Write-Host "        - target VNet: $tgtVNet, Subnet: $tgtSubnet"
-                Write-Host "        - log/cache storage account: $logStorageId"
-                Write-Host "     )"
+                Write-Host "    az migrate local replication new ..."
+                Write-Host "    (Fill exact flags from 'az migrate local replication new --help' for:"
+                Write-Host "       * source machine"
+                Write-Host "       * target subscription/resource group"
+                Write-Host "       * target region / vnet / subnet"
+                Write-Host "       * cache/log storage account"
+                Write-Host "    )"
                 continue
             }
 
-            Write-Host "  [PHYSICAL] Starting replication for '$vmName' via az migrate local replication new..."
+            Write-Host "  [PHYSICAL] Starting replication for '$vmName' via 'az migrate local replication new'..."
 
-            # TODO: You MUST fill the exact CLI arguments based on:
-            #          az migrate local replication new --help
+            # NOTE:
+            # You MUST verify and adjust these flags by running:
+            #   az migrate local replication new --help
+            # in your environment. Param names can differ by version.
             #
-            # Example pattern (pseudo-code, adjust to real flags):
-            #
-            # az migrate local replication new \
-            #   --resource-group ZTM-Source-SDC \
-            #   --project-name ZTM-POC \
-            #   --source-machine-name <from $disc> \
-            #   --target-subscription-id $tgtSub \
-            #   --target-resource-group $tgtRG \
-            #   --target-region $tgtRegion \
-            #   --target-vnet VNET-HCEZTM-Target-01 \
-            #   --target-subnet Subnet-HCEZTM-Target-01 \
-            #   --log-storage-account-id $logStorageId
+            # The below is a BEST-GUESS template and may need tweaking.
 
-            # Build az args here once you know the flags
             $replicationArgs = @(
                 "migrate","local","replication","new",
                 "--resource-group",$projRG,
-                "--project-name",$projName
-                # ADD: other flags from `az migrate local replication new --help`
+                "--project-name",$projName,
+                # guessed parameter names below; adjust them based on 'az migrate local replication new --help':
+                "--machine-name",$vmName,
+                "--target-subscription-id",$tgtSub,
+                "--target-resource-group",$tgtRG,
+                "--target-location",$tgtRegion,
+                "--target-vnet",$tgtVNet,
+                "--target-subnet",$tgtSubnet,
+                "--cache-storage-account-id",$logStorageId,
+                "--target-vm-name",$targetVM
             )
 
             try {
                 az @replicationArgs
                 Write-Host "  [PHYSICAL] Replication command submitted for '$vmName'."
             } catch {
-                Write-Warning "  [PHYSICAL] az migrate local replication new failed for '$vmName': $($_.Exception.Message)"
+                Write-Warning "  [PHYSICAL] 'az migrate local replication new' failed for '$vmName': $($_.Exception.Message)"
             }
 
             continue
         }
 
-        # ========================== OTHER TYPES (VMware, etc.) ==========================
-        Write-Warning "  [$vmName] MigrationType '$migrationType' not implemented in this script (only Physical handled here)."
+        # ======================= OTHER TYPES (VMware, etc.) =======================
+        Write-Warning "  [$vmName] MigrationType '$migrationType' not implemented in this script (only Physical handled)."
     }
 
     Write-Host ""
-    Write-Host "===== replication-run.ps1 complete (az migrate local) ====="
+    Write-Host "===== replication-run.ps1 complete ====="
 }
 catch {
-    Write-Error "Fatal error in replication-run: $($_.Exception.Message)"
+    Write-Error ("Fatal error in replication-run: " + $_.Exception.Message)
     exit 1
 }

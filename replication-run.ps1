@@ -72,7 +72,7 @@ try {
         throw ("Discovery file not found: " + $DiscoveryFile)
     }
 
-    $jsonText  = Get-Content -Path $DiscoveryFile -Raw
+    $jsonText   = Get-Content -Path $DiscoveryFile -Raw
     $discovered = $jsonText | ConvertFrom-Json
     if ($null -eq $discovered) {
         throw "Discovery JSON is null or empty."
@@ -227,7 +227,6 @@ try {
     $mode = $null
 
     if ($NonInteractive) {
-        # Use MIG_MODE env var in CI
         $mode = $env:MIG_MODE
         if ([string]::IsNullOrWhiteSpace($mode)) { $mode = "DryRun" }
         $mode = $mode.Trim()
@@ -306,8 +305,8 @@ try {
 
         Set-AzContext -Subscription $targetSubId -ErrorAction Stop
 
-        $osName   = ""
-        $isWindows = $true
+        $osName     = ""
+        $vmIsWindows = $true
 
         if ($m.PSObject.Properties.Name -contains "OS" -and $m.OS) {
             $osName = $m.OS.ToString()
@@ -318,9 +317,9 @@ try {
             $osLower -like "*ubuntu*" -or
             $osLower -like "*centos*" -or
             $osLower -like "*red hat*") {
-            $isWindows = $false
+            $vmIsWindows = $false
         } else {
-            $isWindows = $true
+            $vmIsWindows = $true
         }
 
         Write-Host ("Processing machine: " + $mn + " (OS: " + $osName + ")")
@@ -366,7 +365,7 @@ try {
         $offer     = ""
         $sku       = ""
 
-        if ($isWindows) {
+        if ($vmIsWindows) {
             $publisher = "MicrosoftWindowsServer"
             $offer     = "WindowsServer"
             $sku       = "2019-datacenter"
@@ -380,10 +379,10 @@ try {
 
         Write-Host ("Selected image: " + $publisher + " / " + $offer + " / " + $sku)
 
-        $vmSize  = "Standard_D2s_v3"
+        $vmSize   = "Standard_D2s_v3"
         $vmConfig = New-AzVMConfig -VMName $mn -VMSize $vmSize
 
-        if ($isWindows) {
+        if ($vmIsWindows) {
             $compName = Get-WindowsComputerName -BaseName $mn
             Write-Host ("Using Windows computer name: " + $compName)
             $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows -ComputerName $compName -Credential $cred -ProvisionVMAgent -EnableAutoUpdate

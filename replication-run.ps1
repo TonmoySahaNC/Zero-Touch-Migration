@@ -1,6 +1,6 @@
 <#
-  CSV-driven replication for PHYSICAL servers using `az migrate local`.
-  - Called from login-and-trigger.ps1
+  Simple CSV-driven replication for PHYSICAL servers using `az migrate local`.
+  Called from login-and-trigger.ps1
 #>
 
 param(
@@ -12,30 +12,15 @@ param(
     [string]$Mode = "DryRun"   # DryRun or Replicate
 )
 
-Set-StrictMode -Version Latest
-
-function Get-Field {
-    param(
-        [object]$Row,
-        [string]$Name
-    )
-    if ($Row.PSObject.Properties.Name -contains $Name) {
-        $v = $Row.$Name
-        if ($null -ne $v) {
-            $s = $v.ToString().Trim()
-            if ($s -ne "") { return $s }
-        }
-    }
-    return ""
-}
-
 try {
     Write-Host "========== replication-run.ps1 (az migrate local) =========="
     Write-Host ("InputCsv : " + $InputCsv)
     Write-Host ("Mode     : " + $Mode)
 
-    $modeUpper = ($Mode ?? "").ToUpperInvariant()
+    # Normalize mode
+    $modeUpper = [string]$Mode
     if (-not $modeUpper) { $modeUpper = "REPLICATE" }
+    else { $modeUpper = $modeUpper.ToUpper() }
 
     if (-not (Test-Path $InputCsv)) {
         throw "Input CSV not found: $InputCsv"
@@ -57,8 +42,9 @@ try {
 
     foreach ($row in $rows) {
 
-        $migrationType = (Get-Field $row "MigrationType")
-        $vmName        = (Get-Field $row "VMName")
+        # Plain, safe reads (no Trim)
+        $migrationType = [string]$row.MigrationType
+        $vmName        = [string]$row.VMName
 
         if (-not $vmName) {
             Write-Warning ("Skipping row with no VMName. Raw row: " + ($row | Out-String))
@@ -69,15 +55,17 @@ try {
         Write-Host ("----- Processing VM: " + $vmName + " -----")
         Write-Host ("  MigrationType : " + $migrationType)
 
-        $mtNorm = ($migrationType ?? "").ToLowerInvariant()
+        if (-not $migrationType) { $migrationType = "" }
+        $mtNorm = $migrationType.ToLower()
+
         if ($mtNorm -ne "physical") {
-            Write-Host ("  Not Physical. Skipping (this script only handles Physical).")
+            Write-Host "  Not Physical. Skipping (this script only handles Physical)."
             continue
         }
 
         # Azure Migrate project info
-        $projRG   = Get-Field $row "SrcResourceGroup"
-        $projName = Get-Field $row "MigrationProjectName"
+        $projRG   = [string]$row.SrcResourceGroup
+        $projName = [string]$row.MigrationProjectName
 
         if (-not $projRG -or -not $projName) {
             Write-Warning ("  Project RG/Name missing for " + $vmName + ". Skipping.")
@@ -85,18 +73,18 @@ try {
         }
 
         # Target info
-        $tgtSub    = Get-Field $row "TgtSubscriptionId"
-        $tgtRG     = Get-Field $row "TgtResourceGroup"
-        $tgtVNet   = Get-Field $row "TgtVNet"
-        $tgtSubnet = Get-Field $row "TgtSubnet"
-        $tgtRegion = Get-Field $row "TgtLocation"
+        $tgtSub    = [string]$row.TgtSubscriptionId
+        $tgtRG     = [string]$row.TgtResourceGroup
+        $tgtVNet   = [string]$row.TgtVNet
+        $tgtSubnet = [string]$row.TgtSubnet
+        $tgtRegion = [string]$row.TgtLocation
 
-        $targetVMName = Get-Field $row "TargetVMName"
+        $targetVMName = [string]$row.TargetVMName
         if (-not $targetVMName) { $targetVMName = $vmName }
 
         # Storage / cache
-        $bootDiagSA   = Get-Field $row "BootDiagStorageAccountName"
-        $bootDiagSARG = Get-Field $row "BootDiagStorageAccountRG"
+        $bootDiagSA   = [string]$row.BootDiagStorageAccountName
+        $bootDiagSARG = [string]$row.BootDiagStorageAccountRG
 
         if (-not $tgtSub -or -not $tgtRG -or -not $tgtVNet -or -not $tgtSubnet -or -not $tgtRegion) {
             Write-Warning ("  Target subscription/RG/VNet/Subnet/Region incomplete for " + $vmName + ". Skipping.")
@@ -108,7 +96,7 @@ try {
             $cacheStorageId = "/subscriptions/$tgtSub/resourceGroups/$bootDiagSARG/providers/Microsoft.Storage/storageAccounts/$bootDiagSA"
         }
 
-        # 1) Check discovery in Azure Migrate (physical via appliance)
+        # -------- 1) Check discovery in Azure Migrate --------
         Write-Host ("  Checking discovery in Azure Migrate project '" + $projName + "' (RG: " + $projRG + ") ...")
 
         $getDiscArgs = @(
@@ -119,19 +107,19 @@ try {
             "--output","json"
         )
 
-        $discRaw = $null
+        $discRawObj = $null
         try {
-            $discRaw = az @getDiscArgs 2>&1
+            $discRawObj = az @getDiscArgs 2>&1
         } catch {
             Write-Warning ("  az migrate local get-discovered-server threw an exception for " + $vmName)
             Write-Warning ("  Exception: " + $_.Exception.Message)
             continue
         }
 
-        # Force to string before trimming/checking
+        # Force to a flat string
         $discRawStr = ""
-        if ($discRaw -ne $null) {
-            $discRawStr = ($discRaw | Out-String)
+        if ($discRawObj -ne $null) {
+            $discRawStr = ($discRawObj | Out-String)
         }
 
         if ([string]::IsNullOrWhiteSpace($discRawStr)) {
@@ -159,14 +147,14 @@ try {
             continue
         }
 
-        $discName = $disc.machineName
+        $discName = [string]$disc.machineName
         Write-Host ("  Discovered: " + $discName)
 
-        # 2) Optional: replication init per project (one-time)
+        # -------- 2) Optional: replication init per project --------
         $projKey = "$projRG|$projName"
         if (-not $initializedProjects.ContainsKey($projKey)) {
 
-            # IMPORTANT: set to the actual appliance name you see in portal (Servers -> Azure Migrate appliances)
+            # IMPORTANT: set this to the actual appliance name you see in portal (Servers -> Azure Migrate appliances)
             $sourceApplianceName = "migrateapplia"
             $targetApplianceName = $sourceApplianceName
 
@@ -198,7 +186,7 @@ try {
             $initializedProjects[$projKey] = $true
         }
 
-        # 3) Start replication for this VM
+        # -------- 3) Start replication for this VM --------
         # IMPORTANT: confirm these flags with:
         #   az migrate local replication new --help
         $repArgs = @(
@@ -228,9 +216,11 @@ try {
         Write-Host ("    az " + ($repArgs -join " "))
 
         try {
-            $repOut = az @repArgs 2>&1
+            $repOutObj = az @repArgs 2>&1
+            $repOutStr = ""
+            if ($repOutObj -ne $null) { $repOutStr = ($repOutObj | Out-String) }
             Write-Host "  az migrate local replication new output:"
-            Write-Host $repOut
+            Write-Host $repOutStr
         } catch {
             $msg = "  az migrate local replication new failed for " + $vmName + ". Exception: " + $_.Exception.Message
             Write-Warning $msg

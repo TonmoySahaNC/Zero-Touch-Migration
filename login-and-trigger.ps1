@@ -1,70 +1,63 @@
+
 param(
-    [switch]$UseServicePrincipal,
-    [string]$TokenFile = ".\token.enc",
-    [string]$InputCsv   = ".\migration_input.csv",
-    [string]$Script2    = ".\select-migration-type.ps1",
-    [string]$Mode       = ""   # optional override: "DryRun" or "Replicate"
+    [switch]$UseServicePrincipal,      # use SPN (clientId/secret + tenant provided through env or Azure CLI)
+    [string]$InputCsv = ".\migration_input.csv",
+    [string]$Mode     = "Replicate",   # DryRun | Replicate
+    [string]$SubscriptionId = ""       # optional - specify subscription to set context
 )
 
+Set-StrictMode -Version Latest
 try {
-    Write-Host "Connecting to Azure"
+    Write-Host "========== login-and-trigger.ps1 =========="
 
-    if ($UseServicePrincipal -or $env:USE_SERVICE_PRINCIPAL -eq "true") {
-        $tenantId     = $env:AZURE_TENANT_ID
-        $clientId     = $env:AZURE_CLIENT_ID
-        $clientSecret = $env:AZURE_CLIENT_SECRET
-
-        if (-not $tenantId -or -not $clientId -or -not $clientSecret) {
-            throw "Missing AZURE_TENANT_ID, AZURE_CLIENT_ID or AZURE_CLIENT_SECRET."
+    if ($UseServicePrincipal) {
+        Write-Host "Logging in with Service Principal..."
+        # Expect AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID in env or use az login with service-principal args here
+        if (-not $env:AZURE_CLIENT_ID -or -not $env:AZURE_CLIENT_SECRET -or -not $env:AZURE_TENANT_ID) {
+            Write-Error "AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID must be set in environment for SPN login."
+            exit 1
         }
-
-        $secureSecret = ConvertTo-SecureString $clientSecret -AsPlainText -Force
-        $spCred       = New-Object System.Management.Automation.PSCredential($clientId, $secureSecret)
-
-        Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $spCred -ErrorAction Stop
-        Write-Host "Connected using service principal."
+        az login --service-principal -u $env:AZURE_CLIENT_ID -p $env:AZURE_CLIENT_SECRET --tenant $env:AZURE_TENANT_ID | Out-Null
     }
     else {
-        Write-Host "Connecting interactively using user login."
-        Connect-AzAccount -ErrorAction Stop
+        Write-Host "Interactive login..."
+        az login | Out-Null
     }
 
-    Write-Host ""
-    Write-Host "Retrieving subscriptions in this context"
-    Get-AzSubscription | Format-Table -Property Name, Id, TenantId
-
-    Write-Host ""
-    Write-Host "Acquiring access token"
-    $tokenResult = Get-AzAccessToken -ResourceUrl "https://management.azure.com/" -ErrorAction Stop
-    $token = $tokenResult.Token
-
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($token)
-    $protected = [System.Security.Cryptography.ProtectedData]::Protect(
-        $bytes,
-        $null,
-        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-    )
-    [System.IO.File]::WriteAllBytes($TokenFile, $protected)
-
-    Write-Host "Encrypted token saved to $TokenFile"
-
-    if (-not (Test-Path $InputCsv)) {
-        throw "Input CSV not found: $InputCsv"
+    if ($SubscriptionId -and $SubscriptionId.Trim() -ne "") {
+        Write-Host "Setting subscription: $SubscriptionId"
+        az account set --subscription $SubscriptionId
     }
 
-    if (-not (Test-Path $Script2)) {
-        throw "Next script not found: $Script2"
+    # Create token file for compatibility with older scripts (not used by replication-run but kept for parity)
+    try {
+        $accessToken = az account get-access-token --query accessToken -o tsv
+        if ($accessToken) {
+            $tokenFile = ".\token.enc"
+            $accessToken | Out-File -FilePath $tokenFile -Encoding ascii
+            Write-Host "Acquired access token and saved to $tokenFile"
+        }
+    } catch {
+        Write-Warning "Unable to save token file: $($_.Exception.Message)"
     }
 
-    Write-Host "Calling next script"
-    if ($Mode -and $Mode -ne "") {
-        & $Script2 -TokenFile $TokenFile -InputCsv $InputCsv -Mode $Mode
+    # Call replication-run directly (no discovery script)
+    $replicationScript = ".\replication-run.ps1"
+    if (-not (Test-Path $replicationScript)) {
+        Write-Error "Replication script not found at $replicationScript"
+        exit 1
     }
-    else {
-        & $Script2 -TokenFile $TokenFile -InputCsv $InputCsv
-    }
+
+    # Export MIG_MODE and MIG_INPUT_CSV to environment to be consumed by downstream scripts if needed
+    $env:MIG_MODE = $Mode
+    $env:MIG_INPUT_CSV = $InputCsv
+
+    Write-Host "Calling replication-run..."
+    & $replicationScript -TokenFile ".\token.enc" -InputCsv $InputCsv -Mode $Mode
+
+    Write-Host "login-and-trigger finished."
 }
 catch {
-    Write-Error ("Fatal error in login-and-trigger: " + $_.ToString())
+    Write-Error "Fatal error in login-and-trigger: $($_.Exception.Message)"
     exit 1
 }

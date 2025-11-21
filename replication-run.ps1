@@ -67,7 +67,6 @@ try {
         throw "Discovery JSON is null or empty."
     }
 
-    # Ensure we have an array
     if ($discovered -isnot [System.Collections.IEnumerable] -or $discovered -is [string]) {
         $discovered = @($discovered)
     }
@@ -83,7 +82,6 @@ try {
         throw "Input CSV has no data."
     }
 
-    # Filter to Physical rows
     $physicalRows = @()
     foreach ($row in $csvRows) {
         $mt = ""
@@ -97,7 +95,6 @@ try {
         throw "No rows with MigrationType 'Physical' found in CSV."
     }
 
-    # Build map: VMName -> row (case-insensitive)
     $vmMap = @{}
     $allowedNames = @()
     foreach ($row in $physicalRows) {
@@ -117,7 +114,6 @@ try {
 
     Write-Host ("CSV specifies these VM names for Physical migration: " + ($allowedNames -join ", "))
 
-    # Filter discovered machines to only those in CSV VMName
     $machinesToUse = @()
     $seenNames = @{}
 
@@ -146,7 +142,6 @@ try {
 
     Write-Host ("Loaded " + $discovered.Count + " discovered entries, after CSV filter and dedupe " + $machinesToUse.Count + " machines will be considered.")
 
-    # From first Physical row, get target sub, RG, etc (used as defaults)
     $first = $physicalRows[0]
 
     $defaultTgtSubId  = Get-Field -Row $first -Names @("TgtSubscriptionId","TargetSubscriptionId","TargetSubId")
@@ -166,17 +161,6 @@ try {
     Write-Host ("Setting target subscription context to " + $defaultTgtSubId)
     Set-AzContext -Subscription $defaultTgtSubId -ErrorAction Stop
 
-    # Check if we can connect to storage account (for info; final use is per-VM)
-    if ($defaultBootSA -ne "" -and $defaultBootSARG -ne "") {
-        try {
-            $sa = Get-AzStorageAccount -Name $defaultBootSA -ResourceGroupName $defaultBootSARG -ErrorAction Stop
-            Write-Host ("Using provided storage account: " + $defaultBootSA + " in RG " + $defaultBootSARG)
-        } catch {
-            Write-Warning ("Provided storage account " + $defaultBootSA + " in RG " + $defaultBootSARG + " not found or not accessible. Boot diagnostics may use another storage.")
-        }
-    }
-
-    # DryRun: show MachineName, OS, CPU, RAM, TargetVMExists
     Write-Host ""
     Write-Host "===== DryRun Validation ====="
     Write-Host ""
@@ -200,11 +184,11 @@ try {
         }
 
         $report += [PSCustomObject]@{
-            MachineName   = $mn
-            OS            = $os
-            CPU_Cores     = $cpu
-            RAM_GB        = $ram
-            TargetVMExists= $exists
+            MachineName    = $mn
+            OS             = $os
+            CPU_Cores      = $cpu
+            RAM_GB         = $ram
+            TargetVMExists = $exists
         }
     }
 
@@ -301,7 +285,6 @@ try {
 
         Write-Host ("Processing machine: " + $mn + " (OS: " + $osName + ")")
 
-        # Resolve VNet and Subnet
         try {
             Write-Host ("Using target VNet " + $targetVNet + " and subnet " + $targetSubnet + " for VM " + $mn)
             $vnet = Get-AzVirtualNetwork -Name $targetVNet -ResourceGroupName $targetRG -ErrorAction Stop
@@ -323,7 +306,6 @@ try {
             continue
         }
 
-        # NIC
         $nicName = $mn + "-nic"
         $nic = $null
         try {
@@ -334,11 +316,9 @@ try {
             $nic = New-AzNetworkInterface -Name $nicName -ResourceGroupName $targetRG -Location $location -SubnetId $subnet.Id
         }
 
-        # Admin credential
         $securePass = ConvertTo-SecureString $adminPass -AsPlainText -Force
         $cred = New-Object System.Management.Automation.PSCredential ($adminUser, $securePass)
 
-        # Decide OS image based on osName
         $publisher = ""
         $offer     = ""
         $sku       = ""
@@ -372,17 +352,34 @@ try {
         $vmConfig = Add-AzVMNetworkInterface -VM $vmConfig -Id $nic.Id
         $vmConfig = Set-AzVMSourceImage -VM $vmConfig -PublisherName $publisher -Offer $offer -Skus $sku -Version "latest"
 
-        # Boot diagnostics with storage account if provided
+        # --------- BOOT DIAGNOSTICS HANDLING (NO AUTO-CREATED STORAGE) ----------
+        # Always create DiagnosticsProfile / BootDiagnostics on the VM object
+        if (-not $vmConfig.DiagnosticsProfile) {
+            $vmConfig.DiagnosticsProfile = New-Object -TypeName "Microsoft.Azure.Management.Compute.Models.DiagnosticsProfile"
+        }
+
+        if (-not $vmConfig.DiagnosticsProfile.BootDiagnostics) {
+            $vmConfig.DiagnosticsProfile.BootDiagnostics = New-Object -TypeName "Microsoft.Azure.Management.Compute.Models.BootDiagnostics"
+        }
+
         if ($bootSA -ne "" -and $bootSARG -ne "") {
             try {
                 $sa = Get-AzStorageAccount -Name $bootSA -ResourceGroupName $bootSARG -ErrorAction Stop
                 $bootUri = $sa.PrimaryEndpoints.Blob.ToString()
                 Write-Host ("Using boot diagnostics storage: " + $bootSA + " in RG " + $bootSARG)
-                $vmConfig = Set-AzVMBootDiagnostics -VM $vmConfig -Enable -StorageUri $bootUri
+                $vmConfig.DiagnosticsProfile.BootDiagnostics.Enabled = $true
+                $vmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $bootUri
             } catch {
-                Write-Warning ("Failed to configure boot diagnostics with storage account " + $bootSA + " in RG " + $bootSARG + ".")
+                Write-Warning ("Could not use storage account " + $bootSA + " in RG " + $bootSARG + " for boot diagnostics. Disabling boot diagnostics for VM " + $mn + ".")
+                $vmConfig.DiagnosticsProfile.BootDiagnostics.Enabled = $false
+                $vmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $null
             }
+        } else {
+            Write-Host ("No boot diagnostics storage specified for VM " + $mn + ". Boot diagnostics will be disabled to avoid auto-created storage accounts.")
+            $vmConfig.DiagnosticsProfile.BootDiagnostics.Enabled = $false
+            $vmConfig.DiagnosticsProfile.BootDiagnostics.StorageUri = $null
         }
+        # -----------------------------------------------------------------------
 
         Write-Host ("Creating VM " + $mn + " in RG " + $targetRG + " (Location: " + $location + ") ...")
 

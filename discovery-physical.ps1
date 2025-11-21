@@ -1,9 +1,15 @@
 param(
-    [string]$TokenFile    = ".\token.enc",
-    [string]$InputCsv     = ".\migration_input.csv",
-    [string]$OutputFolder = ".\",
-    [string]$Script4      = ".\replication-run.ps1",
-    [string]$Mode         = ""   # pass-through for DryRun / Replicate
+    # Passed by login-and-trigger.ps1, even if we don't use it inside this script
+    [string]$TokenFile = ".\token.enc",
+
+    [Parameter(Mandatory = $true)]
+    [string]$InputCsv,              # e.g. .\migration_input.csv
+
+    [string]$OutputFolder = ".\",   # where discovery-output.json will be written
+
+    [string]$NextScript  = ".\replication-run.ps1",
+
+    [string]$Mode = ""              # Replicate / DryRun (if you use it)
 )
 
 function Get-Field {

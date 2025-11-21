@@ -11,30 +11,53 @@ on:
 jobs:
   migrate:
     runs-on: windows-latest
+
     env:
+      # Azure service principal details (already in your repo as secrets)
       AZURE_TENANT_ID:     ${{ secrets.AZURE_TENANT_ID }}
       AZURE_CLIENT_ID:     ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      USE_SERVICE_PRINCIPAL: "true"
-      MIG_NONINTERACTIVE:    "true"
-      # Path to CSV in repo (change if stored elsewhere)
-      MIG_INPUT_CSV: "./migration_input.csv"
+
+      # Path to the migration CSV inside the repo
+      MIG_INPUT_CSV:       'migration_input.csv'
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Optional: if you want explicit PowerShell Core, but windows-latest already has pwsh
+      - name: Show PowerShell version
+        shell: pwsh
+        run: |
+          $PSVersionTable
 
       - name: Install Az PowerShell
         shell: pwsh
         run: |
+          # Install the Az meta-module (includes most Az.* modules)
           Install-Module Az -Scope CurrentUser -Force -AllowClobber
-          Import-Module Az.Accounts,Az.Resources,Az.Compute,Az.Network,Az.Storage
+
+          # Import the Az modules we actually need
+          Import-Module Az.Accounts,Az.Resources,Az.Compute,Az.Network,Az.Storage,Az.Migrate
+
+          # Show which modules are loaded (for troubleshooting)
+          Get-Module Az* | Format-Table Name,Version
 
       - name: Run migration (CSV-driven)
         shell: pwsh
         env:
+          # Map input DRY_RUN to a mode string the scripts understand
           MIG_MODE: ${{ github.event.inputs.DRY_RUN == 'true' && 'DryRun' || 'Replicate' }}
         run: |
           cd ${{ github.workspace }}
-          # run login-and-trigger using service principal, supply CSV path and Mode
+
+          Write-Host "========== Starting CSV-driven migration =========="
+          Write-Host "MIG_INPUT_CSV: $env:MIG_INPUT_CSV"
+          Write-Host "MIG_MODE     : $env.MIG_MODE"
+
+          # Run the orchestrator script which:
+          #   1. Logs in to Azure using SP creds from env (AZURE_* vars)
+          #   2. Calls select-migration-type.ps1
+          #   3. Which then calls discovery-physical.ps1
+          #   4. Which then calls replication-run.ps1 (Azure Migrate based)
           .\login-and-trigger.ps1 -UseServicePrincipal -InputCsv $env:MIG_INPUT_CSV -Mode $env:MIG_MODE

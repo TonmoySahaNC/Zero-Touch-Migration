@@ -4,6 +4,7 @@ param(
     [string]$InputCsv     = ".\migration_input.csv",
     [string]$Mode         = ""
 )
+
 function Get-Field {
     param(
         [object]$Row,
@@ -37,23 +38,11 @@ function Resolve-Mode {
         return $env:MIG_MODE.Trim()
     }
 
-    # default
     return "DryRun"
 }
 
-# Placeholder for data sync hook if you later want DB/file sync before cutover
-function Invoke-PreCutoverDataSync {
-    param(
-        [string]$MachineName,
-        [object]$CsvRow
-    )
-
-    # Implement DMS / AzCopy / File Sync etc. here if needed later.
-    Write-Host "[INFO] (placeholder) Pre-cutover data sync for $MachineName"
-}
-
 try {
-    Write-Host "========== replication-run.ps1 (Azure Migrate) =========="
+    Write-Host "========== replication-run.ps1 (Azure Migrate / physical-aware) =========="
 
     if (-not (Test-Path $DiscoveryFile)) {
         throw "Discovery file not found: $DiscoveryFile"
@@ -69,86 +58,45 @@ try {
     Write-Host ("DiscoveryFile : " + $DiscoveryFile)
     Write-Host ("InputCsv      : " + $InputCsv)
 
-    # Import Azure modules
     Import-Module Az.Accounts,Az.Resources,Az.Network,Az.Migrate -ErrorAction Stop
 
-    # Read CSV
     $csvRows = Import-Csv -Path $InputCsv
     if (-not $csvRows -or $csvRows.Count -eq 0) {
         throw "Input CSV is empty: $InputCsv"
     }
 
-    # Read discovery JSON if you want to log/use later (currently not strictly needed)
-    $discoveryJson       = Get-Content -Path $DiscoveryFile -Raw
-    $discoveredMachines  = $null
+    $discoveryJson = Get-Content -Path $DiscoveryFile -Raw
+    $discoveredMachines = $null
     try {
         $discoveredMachines = $discoveryJson | ConvertFrom-Json
     } catch {
         Write-Warning "Discovery file is not valid JSON or not used. Continuing without it."
     }
 
-    # Track infra initialization per project+region so we call Initialize only once
     $initializedInfra = @{}
 
     foreach ($row in $csvRows) {
 
-        # ----- MAP CSV COLUMNS (using your confirmed headers) -----
-
-        # Migration type – you use "Physical"
         $migrationType          = Get-Field $row @("MigrationType","Type")
+        $migrationTypeNorm      = $migrationType.ToLowerInvariant()
 
-        # Azure Migrate project lives under "source" subscription/RG
+        # Project (Azure Migrate) details (using your Src* columns)
         $projectSubscriptionId  = Get-Field $row @("SrcSubscriptionId","ProjectSubscriptionId","SubscriptionId")
-        $projectRG              = Get-Field $row @(
-            "SrcResourceGroup",
-            "MigrationProjectRG",
-            "MigrationProjectResourceGroup",
-            "ProjectResourceGroup"
-        )
-        $projectName            = Get-Field $row @(
-            "MigrationProjectName",
-            "ProjectName",
-            "AzMigrateProjectName"
-        )
+        $projectRG              = Get-Field $row @("SrcResourceGroup","MigrationProjectRG","MigrationProjectResourceGroup","ProjectResourceGroup")
+        $projectName            = Get-Field $row @("MigrationProjectName","ProjectName","AzMigrateProjectName")
 
-        # Target subscription / RG / networking (where replicated VM will land)
+        # Target details (Tgt* columns)
         $targetSubscriptionId   = Get-Field $row @("TgtSubscriptionId","TargetSubscriptionId")
-        if (-not $targetSubscriptionId) {
-            # fall back to project subscription if target sub not explicitly given
-            $targetSubscriptionId = $projectSubscriptionId
-        }
+        if (-not $targetSubscriptionId) { $targetSubscriptionId = $projectSubscriptionId }
 
-        $targetRGName           = Get-Field $row @(
-            "TgtResourceGroup",
-            "TargetResourceGroup",
-            "TargetRG",
-            "TargetResourceGroupName"
-        )
+        $targetRGName           = Get-Field $row @("TgtResourceGroup","TargetResourceGroup","TargetRG","TargetResourceGroupName")
+        $targetVNetName         = Get-Field $row @("TgtVNet","TargetVNetName","TargetVNet")
+        $targetSubnetName       = Get-Field $row @("TgtSubnet","TargetSubnetName","TargetSubnet")
+        $targetRegion           = Get-Field $row @("TgtLocation","TargetRegion","Region")
 
-        $targetVNetName         = Get-Field $row @(
-            "TgtVNet",
-            "TargetVNetName",
-            "TargetVNet"
-        )
-
-        $targetSubnetName       = Get-Field $row @(
-            "TgtSubnet",
-            "TargetSubnetName",
-            "TargetSubnet"
-        )
-
-        # Region for target VM
-        $targetRegion           = Get-Field $row @(
-            "TgtLocation",
-            "TargetRegion",
-            "Region"
-        )
-
-        # Boot diag storage (not used by Azure Migrate, kept for future manual VM creation if needed)
         $bootDiagStorageName    = Get-Field $row @("BootDiagStorageAccountName")
         $bootDiagStorageRG      = Get-Field $row @("BootDiagStorageAccountRG")
 
-        # VM names
         $csvVmName              = Get-Field $row @("VMName","MachineName","SourceVMName")
         $targetVMName           = Get-Field $row @("TargetVMName","VMName","MachineName")
         if (-not $targetVMName) { $targetVMName = $csvVmName }
@@ -160,8 +108,23 @@ try {
 
         Write-Host ""
         Write-Host "----- Processing row for VM: $csvVmName -----"
+        Write-Host "  MigrationType : $migrationType"
 
-        # ----- Validate project info -----
+        # PHYSICAL: for now, we log and skip automatic replication
+        if ($migrationTypeNorm -eq "physical") {
+            Write-Warning "  [$csvVmName] MigrationType=Physical. Azure Migrate PowerShell does not support starting physical replication."
+            Write-Warning "  [$csvVmName] Replication must be configured via Azure Migrate/ASR portal (vault: ZTM-POC-MigrateVault-1163665249)."
+            continue
+        }
+
+        # For future: support VMware via Az.Migrate
+        if ($migrationTypeNorm -ne "vmware") {
+            Write-Warning "  [$csvVmName] Unsupported MigrationType '$migrationType'. Currently only Physical (skipped) and VMware (Az.Migrate) are modeled."
+            continue
+        }
+
+        # ---------- VMware path via Azure Migrate ----------
+
         if ($projectSubscriptionId) {
             Write-Host ("  Setting context to Project Subscription: " + $projectSubscriptionId)
             Set-AzContext -SubscriptionId $projectSubscriptionId -ErrorAction Stop | Out-Null
@@ -177,7 +140,6 @@ try {
             continue
         }
 
-        # ----- Get or create Azure Migrate project -----
         $migrateProject = Get-AzMigrateProject -Name $projectName -ResourceGroupName $projectRG -ErrorAction SilentlyContinue
         if (-not $migrateProject) {
             if ($effectiveModeUpper -eq "DRYRUN") {
@@ -192,7 +154,6 @@ try {
             Write-Host "  Found Azure Migrate project: $($migrateProject.Name)"
         }
 
-        # ----- Initialize replication infrastructure once per project+region -----
         $infraKey = "$($projectRG)|$($projectName)|$($targetRegion)"
         if (-not $initializedInfra.ContainsKey($infraKey)) {
             if ($effectiveModeUpper -eq "DRYRUN") {
@@ -210,28 +171,25 @@ try {
             $initializedInfra[$infraKey] = $true
         }
 
-        # ----- Build target RG + VNet IDs -----
-        $targetRGId = "/subscriptions/$targetSubscriptionId/resourceGroups/$targetRGName"
-
-        # Build full VNet ARM ID from VNet name
+        $targetRGId     = "/subscriptions/$targetSubscriptionId/resourceGroups/$targetRGName"
         $targetNetworkId = "/subscriptions/$targetSubscriptionId/resourceGroups/$targetRGName/providers/Microsoft.Network/virtualNetworks/$targetVNetName"
 
-        Write-Host "  MigrationType : $migrationType"
         Write-Host "  Project       : $projectName (RG: $projectRG, Region: $targetRegion)"
         Write-Host "  Target RG     : $targetRGName"
         Write-Host "  Target VNet   : $targetNetworkId"
         Write-Host "  Target Subnet : $targetSubnetName"
         Write-Host "  Target VMName : $targetVMName"
 
-        # ----- Get discovered server from Azure Migrate -----
+        # VMware discovered server lookup
         $discServer = Get-AzMigrateDiscoveredServer `
             -ProjectName       $projectName `
             -ResourceGroupName $projectRG `
             -DisplayName       $csvVmName `
+            -MachineType       "VMware" `
             -ErrorAction       SilentlyContinue
 
         if (-not $discServer) {
-            Write-Warning "  Could not find discovered server for $csvVmName in Azure Migrate project $projectName. Skipping."
+            Write-Warning "  Could not find VMware discovered server for $csvVmName in Azure Migrate project $projectName. Skipping."
             continue
         }
 
@@ -243,7 +201,7 @@ try {
             continue
         }
         if (-not $osDiskId) {
-            Write-Warning "  Discovered server for $csvVmName has no OsDiskId. You may need to customize disk mapping. Skipping."
+            Write-Warning "  Discovered server for $csvVmName has no OsDiskId. Skipping."
             continue
         }
 
@@ -261,7 +219,7 @@ try {
                 Write-Host "     LicenseType           = NoLicenseType"
             }
             "REPLICATE" {
-                Write-Host "  Enabling replication for $csvVmName via Azure Migrate..."
+                Write-Host "  Enabling replication for $csvVmName via Azure Migrate (VMware)..."
 
                 $job = New-AzMigrateServerReplication `
                     -MachineId             $machineId `

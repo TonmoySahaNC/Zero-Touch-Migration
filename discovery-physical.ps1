@@ -3,7 +3,7 @@ param(
     [string]$InputCsv     = ".\migration_input.csv",
     [string]$OutputFolder = ".\",
     [string]$Script4      = ".\replication-run.ps1",
-    [string]$Mode         = ""
+    [string]$Mode         = ""   # pass-through for DryRun / Replicate
 )
 
 function Get-Field {
@@ -31,7 +31,7 @@ function Normalize-Machine {
         [object]$Row
     )
 
-    # Adjust these mappings to match whatever columns you actually have
+    # Adjust mappings if you add more fields later
     $vmName          = Get-Field $Row @("VMName","MachineName","Name")
     $osType          = Get-Field $Row @("OSType","OS","OSName")
     $cpuCount        = Get-Field $Row @("CPU","vCPU","CPUs")
@@ -95,7 +95,6 @@ try {
     }
 
     Write-Host ("Reading discovery file via replication-run: " + $outFile)
-
     if ($Mode -and $Mode.Trim() -ne "") {
         & $Script4 -TokenFile $TokenFile -DiscoveryFile $outFile -InputCsv $InputCsv -Mode $Mode
     }

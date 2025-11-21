@@ -3,7 +3,7 @@ param(
     [string]$InputCsv     = ".\migration_input.csv",
     [string]$OutputFolder = ".\",
     [string]$Script4      = ".\replication-run.ps1",
-    [string]$Mode         = ""   # NEW: pass-through for DryRun / Replicate / etc.
+    [string]$Mode         = ""
 )
 
 function Get-Field {

@@ -48,6 +48,13 @@ try {
         throw "Azure CLI 'az' not found in PATH."
     }
 
+    # Make sure migrate extension can auto-install previews without spewing too much junk
+    try {
+        az config set extension.use_dynamic_install=yes_without_prompt extension.dynamic_install_allow_preview=true --only-show-errors | Out-Null
+    } catch {
+        Write-Warning ("  Could not set az config for dynamic install: " + $_.Exception.Message)
+    }
+
     $rows = Import-Csv -Path $InputCsv
     if (-not $rows -or $rows.Count -eq 0) {
         throw "Input CSV is empty."
@@ -119,20 +126,22 @@ try {
             "migrate","local","get-discovered-server",
             "--resource-group",$projRG,
             "--project-name",$projName,
-            "--output","json"
+            "--output","json",
+            "--only-show-errors"
         )
 
-        # Capture ONLY stdout, ignore stderr (warnings/errors printed separately)
+        # Capture ONLY stdout as a single string
         $discRawStr = ""
-        $discRawStr = az @getDiscArgs 2>$null
+        try {
+            $discRawStr = (az @getDiscArgs 2>$null) | Out-String
+        } catch {
+            $warnMsg = "  az migrate local get-discovered-server threw an exception for " + $vmName + ". Exception: " + $_.Exception.Message
+            Write-Warning $warnMsg
+            continue
+        }
 
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($discRawStr)) {
-            Write-Warning "  az migrate local get-discovered-server failed or returned empty for project:"
-            Write-Warning ("    RG=" + $projRG + " Project=" + $projName)
-            # For logging, run once more capturing stderr:
-            $errOut = az @getDiscArgs 2>&1
-            Write-Warning "  Raw az output:"
-            Write-Warning ($errOut | Out-String)
+        if ([string]::IsNullOrWhiteSpace($discRawStr)) {
+            Write-Warning ("  No discovered server JSON for " + $vmName + ". Output was empty. Skipping.")
             continue
         }
 
@@ -140,8 +149,8 @@ try {
         try {
             $discList = $discRawStr | ConvertFrom-Json
         } catch {
-            Write-Warning "  Failed to parse discovery JSON. Raw:"
-            Write-Warning $discRawStr
+            Write-Warning "  Failed to parse discovery JSON. Raw output below:"
+            Write-Warning ($discRawStr | Out-String)
             continue
         }
 
@@ -180,7 +189,8 @@ try {
                 "--resource-group",$projRG,
                 "--project-name",$projName,
                 "--source-appliance-name",$sourceApplianceName,
-                "--target-appliance-name",$targetApplianceName
+                "--target-appliance-name",$targetApplianceName,
+                "--only-show-errors"
             )
             if ($cacheStorageId) {
                 $initArgs += @("--cache-storage-account-id",$cacheStorageId)
@@ -193,10 +203,12 @@ try {
             else {
                 Write-Host "  Initializing replication infra for project..."
                 try {
-                    az @initArgs 2>&1 | Out-String | Write-Host
+                    $initOut = az @initArgs 2>&1
+                    Write-Host ($initOut | Out-String)
                     Write-Host "  Replication infra init completed (or already set up)."
                 } catch {
-                    Write-Warning ("  replication init failed for project " + $projName + ". Exception: " + $_.Exception.Message)
+                    $warnMsg2 = "  replication init failed for project " + $projName + ". Exception: " + $_.Exception.Message
+                    Write-Warning $warnMsg2
                 }
             }
 
@@ -216,7 +228,8 @@ try {
             "--target-location",$tgtRegion,            # verify flag
             "--target-vnet",$tgtVNet,                  # verify flag
             "--target-subnet",$tgtSubnet,              # verify flag
-            "--target-vm-name",$targetVMName           # verify flag
+            "--target-vm-name",$targetVMName,          # verify flag
+            "--only-show-errors"
         )
 
         if ($cacheStorageId) {

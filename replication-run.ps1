@@ -112,54 +112,55 @@ try {
             $cacheStorageId = "/subscriptions/$tgtSub/resourceGroups/$bootDiagSARG/providers/Microsoft.Storage/storageAccounts/$bootDiagSA"
         }
 
-        # -------- 1) Check discovery in Azure Migrate --------
+        # -------- 1) Get ALL discovered servers, then filter in PowerShell --------
         Write-Host ("  Checking discovery in Azure Migrate project '" + $projName + "' (RG: " + $projRG + ") ...")
 
         $getDiscArgs = @(
             "migrate","local","get-discovered-server",
             "--resource-group",$projRG,
             "--project-name",$projName,
-            "--display-name",$vmName,
             "--output","json"
         )
 
-        $discRawObj = $null
-        try {
-            $discRawObj = az @getDiscArgs 2>&1
-        } catch {
-            Write-Warning ("  az migrate local get-discovered-server threw an exception for " + $vmName)
-            Write-Warning ("  Exception: " + $_.Exception.Message)
-            continue
-        }
-
-        # Force to a flat string
+        # Capture ONLY stdout, ignore stderr (warnings/errors printed separately)
         $discRawStr = ""
-        if ($discRawObj -ne $null) {
-            $discRawStr = ($discRawObj | Out-String)
-        }
+        $discRawStr = az @getDiscArgs 2>$null
 
-        if ([string]::IsNullOrWhiteSpace($discRawStr)) {
-            Write-Warning ("  No discovered server found for " + $vmName + ". Raw output was empty. Skipping.")
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($discRawStr)) {
+            Write-Warning "  az migrate local get-discovered-server failed or returned empty for project:"
+            Write-Warning ("    RG=" + $projRG + " Project=" + $projName)
+            # For logging, run once more capturing stderr:
+            $errOut = az @getDiscArgs 2>&1
+            Write-Warning "  Raw az output:"
+            Write-Warning ($errOut | Out-String)
             continue
         }
 
-        $discObj = $null
+        $discList = $null
         try {
-            $discObj = $discRawStr | ConvertFrom-Json
+            $discList = $discRawStr | ConvertFrom-Json
         } catch {
             Write-Warning "  Failed to parse discovery JSON. Raw:"
             Write-Warning $discRawStr
             continue
         }
 
-        if ($discObj -is [System.Array]) {
-            $disc = $discObj | Select-Object -First 1
-        } else {
-            $disc = $discObj
+        if (-not $discList) {
+            Write-Warning ("  No discoverable servers found in project " + $projName + ". Skipping " + $vmName + ".")
+            continue
         }
 
+        if (-not ($discList -is [System.Array])) {
+            $discList = ,$discList
+        }
+
+        # Find matching machine by name
+        $disc = $discList | Where-Object {
+            $_.machineName -and ($_.machineName.ToString().ToLower() -eq $vmName.ToLower())
+        } | Select-Object -First 1
+
         if (-not $disc) {
-            Write-Warning ("  Discovery object empty for " + $vmName + ". Skipping.")
+            Write-Warning ("  Discovered servers found, but none matching VMName='" + $vmName + "'. Skipping.")
             continue
         }
 
@@ -192,7 +193,7 @@ try {
             else {
                 Write-Host "  Initializing replication infra for project..."
                 try {
-                    az @initArgs | Out-Null
+                    az @initArgs 2>&1 | Out-String | Write-Host
                     Write-Host "  Replication infra init completed (or already set up)."
                 } catch {
                     Write-Warning ("  replication init failed for project " + $projName + ". Exception: " + $_.Exception.Message)
@@ -245,6 +246,7 @@ try {
 
     Write-Host ""
     Write-Host "===== replication-run.ps1 complete ====="
+    exit 0
 }
 catch {
     $err = "Fatal error in replication-run: " + $_.Exception.Message

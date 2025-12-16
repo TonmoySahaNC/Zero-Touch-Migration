@@ -47,3 +47,21 @@ jobs:
           Write-Host "MIG_MODE     : $env:MIG_MODE"
 
           .\login-and-trigger.ps1 -UseServicePrincipal -InputCsv $env:MIG_INPUT_CSV -Mode $env:MIG_MODE
+
+      # Upload the JSON outputs even if a step failed
+      - name: Upload discovery & mapping outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ztm-outputs-${{ github.run_id }}
+          path: |
+            ${{ github.workspace }}\out\discovery-output.json
+            ${{ github.workspace }}\out\mapping-output.json
+          retention-days: 14
+        # Upload the full diagnostics folder (REST/CLI raw dumps per VM)
+      - name: Upload raw diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ztm-raw-${{ github.run_id }}
+          path: ${{ github.workspace }}\out\raw

@@ -1,10 +1,10 @@
 
 <#
-  v123 Discovery (parameterless)
-  - REST-first: enumerate *all* machines per unique project (Sub+RG+Project) once
-  - Write full inventory to JSON and CSV (per-project and combined)
-  - Then post-process: join CSV input rows to inventory -> discovery-output.json (unchanged schema)
-  - Safe property access under StrictMode; name normalization
+  v124 Discovery (parameterless)
+  - Fix: robust Count checks under StrictMode (no .Count on strings)
+  - Extra diagnostics for CSV headers
+  - REST-first enumerate once per unique project; write full inventory JSON/CSV
+  - Post-process join to discovery-output.json and csv-to-discovery-join.csv
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -33,13 +33,17 @@ Write-Info "InputCsv     : $InputCsv"
 Write-Info "OutputFolder : $OutputFolder"
 
 $rows = @((Import-Csv -Path $InputCsv))
-if($rows.Count -eq 0){ throw "Input CSV is empty: $InputCsv" }
+if(($rows|Measure-Object).Count -eq 0){ throw "Input CSV is empty: $InputCsv" }
 
 # Required columns
 $req=@('MigrationType','SrcSubscriptionId','SrcResourceGroup','MigrationProjectName','TgtSubscriptionId','TgtResourceGroup','TgtVNet','TgtSubnet','TgtLocation','BootDiagStorageAccountName','BootDiagStorageAccountRG','AdminUsername','VMName','BusinessApplicationName')
-$present=$rows[0].PSObject.Properties.Name
-$missing=$req | Where-Object { $_ -notin $present }
-if($missing.Count -gt 0){ throw ("Input CSV missing required columns: "+($missing -join ', ')) }
+$present=@($rows[0].PSObject.Properties.Name)
+$missing=@($req | Where-Object { $_ -notin $present })
+if( ( $missing | Measure-Object ).Count -gt 0 ){
+  Write-Err ("CSV header columns present: "+($present -join ', '))
+  Write-Err ("CSV header columns required: "+($req -join ', '))
+  throw ("Input CSV missing required columns: "+($missing -join ', '))
+}
 
 # Diagnostic root
 $diagRoot = Join-Path $OutputFolder 'raw'
@@ -47,7 +51,7 @@ if(-not(Test-Path $diagRoot)){ New-Item -ItemType Directory -Path $diagRoot -For
 if($DebugRaw){ Save-Json -path (Join-Path $diagRoot 'csv-rows.json') -obj $rows -depth 6 }
 
 # ---- Phase 1: Enumerate ALL machines per unique (sub,rg,project) ----
-$sets = $rows | Select-Object -Property SrcSubscriptionId,SrcResourceGroup,MigrationProjectName -Unique
+$sets = @($rows | Select-Object -Property SrcSubscriptionId,SrcResourceGroup,MigrationProjectName -Unique)
 $inventoryCombined = New-Object System.Collections.Generic.List[object]
 $inventoryBySet = @{}
 
@@ -58,11 +62,11 @@ foreach($s in $sets){
   if(-not(Test-Path $projDiag)){ New-Item -ItemType Directory -Path $projDiag -Force|Out-Null }
   Write-Info "Enumerating project '$proj' (RG:$rg, Sub:$sub) via REST..."
   $enum = Rest-EnumerateMachines -sub $sub -rg $rg -proj $proj -diagDir $projDiag
-  if($enum -and $enum.value){
-    $inventoryBySet[$setKey] = $enum.value
-    foreach($m in $enum.value){ $inventoryCombined.Add($m) | Out-Null }
-    # Persist per-project
-    Save-Json -path (Join-Path $projDiag "discovery-full-$proj.json") -obj $enum.value -depth 8
+  $vals = @((Get-Prop -Object $enum -Name 'value'))
+  if(($vals|Measure-Object).Count -gt 0){
+    $inventoryBySet[$setKey] = $vals
+    foreach($m in $vals){ $inventoryCombined.Add($m) | Out-Null }
+    Save-Json -path (Join-Path $projDiag "discovery-full-$proj.json") -obj $vals -depth 8
   } else {
     $inventoryBySet[$setKey] = @()
     Write-Warn "No machines returned by REST for project '$proj'."
@@ -78,7 +82,7 @@ Save-Json -path (Join-Path $invDir 'discovery-full.json') -obj $inventoryCombine
 $flat = foreach($m in $inventoryCombined){
   $props = Get-Prop -Object $m -Name 'properties'
   $disc  = @($(Get-Prop -Object $props -Name 'discoveryData'))
-  $first = $null; if($disc -and $disc.Count -gt 0){ $first = $disc[0] }
+  $first = $null; if(($disc|Measure-Object).Count -gt 0){ $first = $disc[0] }
   [PSCustomObject]@{
     id            = Get-Prop -Object $m     -Name 'id'
     name          = Get-Prop -Object $m     -Name 'name'
@@ -92,8 +96,7 @@ $flat = foreach($m in $inventoryCombined){
   }
 }
 $flat | Export-Csv -Path (Join-Path $invDir 'discovery-full.csv') -NoTypeInformation -Encoding UTF8
-
-Write-Info ("Inventory collected. Machines (combined): " + ($inventoryCombined | Measure-Object).Count)
+Write-Info ("Inventory collected. Machines (combined): " + (($inventoryCombined|Measure-Object).Count))
 
 # ---- Phase 2: Post-process join -> discovery-output.json (for mapping) ----
 $outObjects = New-Object System.Collections.Generic.List[object]
@@ -129,7 +132,7 @@ foreach($r in $rows){
     $bootType = Get-Prop -Object $props -Name 'bootType'
     $osName   = Get-Prop -Object $props -Name 'osName'
     $discList = @($(Get-Prop -Object $props -Name 'discoveryData'))
-    if($discList -and $discList.Count -gt 0){
+    if(($discList|Measure-Object).Count -gt 0){
       $dd = $discList[0]
       $osType = Get-Prop -Object $dd -Name 'osType'
       $ext    = Get-Prop -Object $dd -Name 'extendedInfo'
@@ -173,7 +176,7 @@ foreach($r in $rows){
 # Save join results for mapping and an auxiliary join CSV for quick review
 $outFile = Join-Path $OutputFolder 'discovery-output.json'
 $outObjects | ConvertTo-Json -Depth 8 | Out-File -FilePath $outFile -Encoding UTF8
-Write-Info ("Discovery complete. Records: "+ ($outObjects|Measure-Object).Count)
+Write-Info ("Discovery complete. Records: "+ (($outObjects|Measure-Object).Count))
 Write-Info ("Saved file: $outFile")
 
 $joinCsv = foreach($o in $outObjects){

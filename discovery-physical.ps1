@@ -1,8 +1,7 @@
 
 <# 
-  v118 Discovery (parameterless)
-  - Reads MIG_INPUT_CSV, MIG_OUTPUT_DIR, MIG_DETAILED, MIG_DEBUG_RAW
-  - Uses Azure CLI with '--output json' and correct invocation (& az @args)
+  v119 Discovery (parameterless)
+  - Uses Azure CLI with '--output json' and correct invocation (& az @CliArgs)
   - Saves raw diagnostics under out\raw
 #>
 
@@ -42,13 +41,12 @@ function Save-Json($path, $obj, $depth=6) {
   try { $json = $obj | ConvertTo-Json -Depth $depth; Save-Text -path $path -text $json } catch { Write-Warn "Failed JSON save $path : $($_.Exception.Message)" }
 }
 
-function Invoke-AzJson([string[]]$Args, [string]$RawOutPath) {
+function Invoke-AzJson([string[]]$CliArgs, [string]$RawOutPath) {
   try {
-    # Ensure '--output json' exists
-    if (-not ($Args -contains '--output') -and -not ($Args -contains '-o')) { $Args += @('--output','json') }
-    $cmdLine = "az " + ($Args -join " ")
+    if (-not ($CliArgs -contains '--output') -and -not ($CliArgs -contains '-o')) { $CliArgs += @('--output','json') }
+    $cmdLine = "az " + ($CliArgs -join " ")
     Write-Info ("Running: " + $cmdLine)
-    $res = & az @Args 2>&1
+    $res = & az @CliArgs 2>&1
     $text = ($res | Out-String)
     if ($RawOutPath) { Save-Text -path $RawOutPath -text $text }
     try { return ($text | ConvertFrom-Json) } catch { Write-Warn "JSON parse failed for: $cmdLine"; return $null }
@@ -60,28 +58,28 @@ function Invoke-AzJson([string[]]$Args, [string]$RawOutPath) {
 
 function Get-DiscoveredServerCli([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$vmDisplayName,[string]$diagDir) {
   if ($subscriptionId -and $subscriptionId.Trim() -ne "") { & az account set --subscription $subscriptionId | Out-Null }
-  $args = @("migrate","local","get-discovered-server","--project-name",$projectName,"--resource-group",$resourceGroup,"--display-name",$vmDisplayName,"--subscription",$subscriptionId)
+  $cliArgs = @("migrate","local","get-discovered-server","--project-name",$projectName,"--resource-group",$resourceGroup,"--display-name",$vmDisplayName,"--subscription",$subscriptionId)
   $rawPath = Join-Path $diagDir ("cli-" + $vmDisplayName + "-with-filter.txt")
-  $json = Invoke-AzJson -Args $args -RawOutPath $rawPath
+  $json = Invoke-AzJson -CliArgs $cliArgs -RawOutPath $rawPath
   if ($json) { return $json }
   Write-Warn "CLI filtered call returned no JSON or failed. Retrying without display-name filter."
-  $args2 = @("migrate","local","get-discovered-server","--project-name",$projectName,"--resource-group",$resourceGroup,"--subscription",$subscriptionId)
+  $cliArgs2 = @("migrate","local","get-discovered-server","--project-name",$projectName,"--resource-group",$resourceGroup,"--subscription",$subscriptionId)
   $rawPath2 = Join-Path $diagDir ("cli-" + $vmDisplayName + "-no-filter.txt")
-  return (Invoke-AzJson -Args $args2 -RawOutPath $rawPath2)
+  return (Invoke-AzJson -CliArgs $cliArgs2 -RawOutPath $rawPath2)
 }
 
 function Get-ProjectMachinesRest([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$diagDir) {
   $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
-  $args = @("rest","--method","get","--url","https://management.azure.com$uri","--only-show-errors")
+  $cliArgs = @("rest","--method","get","--url","https://management.azure.com$uri")
   $rawPath = Join-Path $diagDir "rest-migrateProjects-machines.txt"
-  return (Invoke-AzJson -Args $args -RawOutPath $rawPath)
+  return (Invoke-AzJson -CliArgs $cliArgs -RawOutPath $rawPath)
 }
 
 function Get-AssessmentMachine([string]$subscriptionId,[string]$resourceGroup,[string]$projectName,[string]$machineName,[string]$diagDir) {
   $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/assessmentProjects/$projectName/machines/$machineName?api-version=2019-10-01"
-  $args = @("rest","--method","get","--url","https://management.azure.com$uri","--only-show-errors")
+  $cliArgs = @("rest","--method","get","--url","https://management.azure.com$uri")
   $rawPath = Join-Path $diagDir ("rest-assessment-machine-" + $machineName + ".txt")
-  return (Invoke-AzJson -Args $args -RawOutPath $rawPath)
+  return (Invoke-AzJson -CliArgs $cliArgs -RawOutPath $rawPath)
 }
 
 try {

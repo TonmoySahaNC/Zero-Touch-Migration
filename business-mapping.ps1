@@ -1,20 +1,9 @@
 
-<#
-.SYNOPSIS
-  Business Application Mapping: group discovered VMs by BusinessApplicationName.
-
-.DESCRIPTION
-  - Reads discovery-output.json.
-  - Groups by BusinessApplicationName.
-  - Emits mapping-output.json with per-app VM list and basic stats.
+<# 
+  Business Application Mapping (parameterless):
+  Reads MIG_DISCOVERY_FILE, MIG_OUTPUT_DIR, MIG_DETAILED from environment.
+  Groups discovered VMs by BusinessApplicationName and writes mapping-output.json.
 #>
-
-param(
-  [Parameter(Mandatory = $true)]
-  [string]$DiscoveryFile,
-  [string]$OutputFolder = ".\out",
-  [switch]$Verbose
-)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -22,15 +11,17 @@ $ErrorActionPreference = "Stop"
 function Write-Info($msg) { Write-Host ("[INFO] " + $msg) }
 function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
 
+$DiscoveryFile = $env:MIG_DISCOVERY_FILE
+$OutputFolder  = $env:MIG_OUTPUT_DIR
+$Detailed      = ($env:MIG_DETAILED -eq "true")
+
 try {
   Write-Info "========== business-mapping.ps1 =========="
   Write-Info "DiscoveryFile: $DiscoveryFile"
   Write-Info "OutputFolder : $OutputFolder"
 
   if (-not (Test-Path $DiscoveryFile)) { throw "Discovery file not found: $DiscoveryFile" }
-  if (-not (Test-Path $OutputFolder)) {
-    New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
-  }
+  if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
   $records = Get-Content -Path $DiscoveryFile -Raw | ConvertFrom-Json
   if (-not $records) { throw "Discovery output is empty: $DiscoveryFile" }
@@ -46,10 +37,10 @@ try {
 
   $out = New-Object System.Collections.Generic.List[object]
   foreach ($k in $apps.Keys) {
-    $list = $apps[$k]
-    $vmNames = ($list | ForEach-Object { $_.Intake.VMName })
-    $found   = ($list | Where-Object { $_.Discovery.FoundInAzureMigrate }).Count
-    $total   = $list.Count
+    $list   = $apps[$k]
+    $vmNames= ($list | ForEach-Object { $_.Intake.VMName })
+    $found  = ($list | Where-Object { $_.Discovery.FoundInAzureMigrate }).Count
+    $total  = $list.Count
     $obj = [PSCustomObject]@{
       BusinessApplicationName = $k
       VMCount                 = $total

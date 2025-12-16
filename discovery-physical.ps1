@@ -1,8 +1,8 @@
 
 <# 
   Discovery phase (parameterless): 
-  Reads MIG_INPUT_CSV, MIG_OUTPUT_DIR, MIG_DETAILED from environment.
-  Collects discovered VM data from Azure Migrate and writes discovery-output.json.
+  Reads MIG_INPUT_CSV, MIG_OUTPUT_DIR, MIG_DETAILED, MIG_DEBUG_RAW from environment.
+  Collects discovered VM data from Azure Migrate and writes discovery-output.json + raw diagnostics.
 #>
 
 Set-StrictMode -Version Latest
@@ -16,6 +16,7 @@ function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
 $InputCsv    = $env:MIG_INPUT_CSV
 $OutputFolder= $env:MIG_OUTPUT_DIR
 $Detailed    = ($env:MIG_DETAILED -eq "true")
+$DebugRaw    = ($env:MIG_DEBUG_RAW -eq "true")
 
 # Required CSV columns (updated schema)
 $requiredColumns = @(
@@ -26,7 +27,7 @@ $requiredColumns = @(
 )
 
 function Test-Columns($rows) {
-  $arr = @($rows) # normalize
+  $arr = @($rows)
   if ($arr.Count -eq 0) { throw "Input CSV has no rows." }
   $sample  = $arr[0]
   $present = $sample.PSObject.Properties.Name
@@ -34,35 +35,55 @@ function Test-Columns($rows) {
   if ($missing -and @($missing).Count -gt 0) { throw ("Input CSV missing required columns: " + ((@($missing)) -join ", ")) }
 }
 
-function Get-DiscoveredServerCli([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$vmDisplayName) {
-  if ($subscriptionId -and $subscriptionId.Trim() -ne "") { az account set --subscription $subscriptionId | Out-Null }
-  $cmd = @("migrate","local","get-discovered-server",
-           "--project-name",$projectName,"--resource-group",$resourceGroup,
-           "--display-name",$vmDisplayName,"--subscription",$subscriptionId)
-  $json = az @cmd --only-show-errors 2>$null
-  if ($json) { return ($json | ConvertFrom-Json) }
-  return $null
+function Save-Text($path, $text) {
+  try { $d = Split-Path $path; if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } ; $text | Out-File -FilePath $path -Encoding UTF8 } catch { Write-Warn "Failed writing $path : $($_.Exception.Message)" }
 }
 
-function Get-ProjectMachinesRest([string]$projectName,[string]$resourceGroup,[string]$subscriptionId) {
-  $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
-  $json = az rest --method get --url "https://management.azure.com$uri" --output json --only-show-errors 2>$null
-  if ($json) { return ($json | ConvertFrom-Json) }
-  return $null
+function Save-Json($path, $obj, $depth=6) {
+  try { $json = $obj | ConvertTo-Json -Depth $depth; Save-Text -path $path -text $json } catch { Write-Warn "Failed JSON save $path : $($_.Exception.Message)" }
 }
 
-function Select-MachineMatch($enumerateResult,[string]$vmDisplayName) {
-  if (-not $enumerateResult -or -not $enumerateResult.value) { return $null }
-  foreach ($m in $enumerateResult.value) {
-    $disp     = $m.properties.displayName
-    $discList = @($m.properties.discoveryData)  # normalize singletons
-    $discName = $null
-    if ($discList -and $discList.Count -gt 0) { $discName = $discList[0].machineName }
-    if ($disp -and $disp -eq $vmDisplayName) { return $m }
-    if ($discName -and $discName -eq $vmDisplayName) { return $m }
-    if ($m.name -eq $vmDisplayName) { return $m }
+function Invoke-AzJson([string[]]$Args, [string]$RawOutPath) {
+  try {
+    $cmdLine = "az " + ($Args -join " ")
+    Write-Info ("Running: " + $cmdLine)
+    $res = az @Args 2>&1
+    $text = ($res | Out-String)
+    if ($RawOutPath) { Save-Text -path $RawOutPath -text $text }
+    try { return ($text | ConvertFrom-Json) } catch { Write-Warn "JSON parse failed for: $cmdLine"; return $null }
+  } catch {
+    Write-Warn "az failed: $($_.Exception.Message)"
+    return $null
   }
-  return $null
+}
+
+function Get-DiscoveredServerCli([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$vmDisplayName,[string]$diagDir) {
+  if ($subscriptionId -and $subscriptionId.Trim() -ne "") { az account set --subscription $subscriptionId | Out-Null }
+  # Try filtered by display name first
+  $args = @("migrate","local","get-discovered-server","--project-name",$projectName,"--resource-group",$resourceGroup,"--display-name",$vmDisplayName,"--subscription",$subscriptionId)
+  $rawPath = Join-Path $diagDir ("cli-" + $vmDisplayName + "-with-filter.txt")
+  $json = Invoke-AzJson -Args $args -RawOutPath $rawPath
+  if ($json) { return $json }
+  Write-Warn "CLI filtered call returned no JSON or failed. Retrying without display-name filter."
+  # Retry without filter to dump all
+  $args2 = @("migrate","local","get-discovered-server","--project-name",$projectName,"--resource-group",$resourceGroup,"--subscription",$subscriptionId)
+  $rawPath2 = Join-Path $diagDir ("cli-" + $vmDisplayName + "-no-filter.txt")
+  return (Invoke-AzJson -Args $args2 -RawOutPath $rawPath2)
+}
+
+function Get-ProjectMachinesRest([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$diagDir) {
+  $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
+  $args = @("rest","--method","get","--url","https://management.azure.com$uri","--output","json","--only-show-errors")
+  $rawPath = Join-Path $diagDir "rest-migrateProjects-machines.txt"
+  return (Invoke-AzJson -Args $args -RawOutPath $rawPath)
+}
+
+function Get-AssessmentMachine([string]$subscriptionId,[string]$resourceGroup,[string]$projectName,[string]$machineName,[string]$diagDir) {
+  # Assessment API v2019-10-01: Machines - Get
+  $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/assessmentProjects/$projectName/machines/$machineName?api-version=2019-10-01"
+  $args = @("rest","--method","get","--url","https://management.azure.com$uri","--output","json","--only-show-errors")
+  $rawPath = Join-Path $diagDir ("rest-assessment-machine-" + $machineName + ".txt")
+  return (Invoke-AzJson -Args $args -RawOutPath $rawPath)
 }
 
 try {
@@ -73,9 +94,14 @@ try {
   if (-not (Test-Path $InputCsv)) { throw "Input CSV not found: $InputCsv" }
   if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
-  $rows = @((Import-Csv -Path $InputCsv))   # normalize single object => array
+  $rows = @((Import-Csv -Path $InputCsv))
   if ($rows.Count -eq 0) { throw "Input CSV is empty: $InputCsv" }
   Test-Columns -rows $rows
+
+  # Diagnostics: save CSV rows
+  $diagDir = Join-Path $OutputFolder "raw"
+  if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
+  if ($DebugRaw) { Save-Json -path (Join-Path $diagDir "csv-rows.json") -obj $rows -depth 6 }
 
   $srcSubs  = ($rows | Select-Object -ExpandProperty SrcSubscriptionId | Sort-Object -Unique)
   $projects = ($rows | Select-Object -ExpandProperty MigrationProjectName | Sort-Object -Unique)
@@ -90,18 +116,47 @@ try {
     $rg  = $r.SrcResourceGroup
     $sub = $r.SrcSubscriptionId
 
-    if ($Detailed) { Write-Info "Discovering VM '$vm' in project '$proj' (RG: $rg, Sub: $sub)..." }
+    $rowDiagDir = Join-Path $diagDir ("proj-" + $proj + "-vm-" + $vm)
+    if (-not (Test-Path $rowDiagDir)) { New-Item -ItemType Directory -Path $rowDiagDir -Force | Out-Null }
 
-    $cliObj = Get-DiscoveredServerCli -projectName $proj -resourceGroup $rg -subscriptionId $sub -vmDisplayName $vm
+    Write-Info "Row => VM:'$vm' Project:'$proj' RG:'$rg' Sub:'$sub'"
 
+    # Primary: CLI discovered server
+    $cliObj = Get-DiscoveredServerCli -projectName $proj -resourceGroup $rg -subscriptionId $sub -vmDisplayName $vm -diagDir $rowDiagDir
+    if ($DebugRaw -and $cliObj) { Save-Json -path (Join-Path $rowDiagDir "cli-json.json") -obj $cliObj -depth 8 }
+
+    # Fallback: enumerate project machines via REST and match
     $restMatch = $null
     if (-not $cliObj) {
-      $enum = Get-ProjectMachinesRest -projectName $proj -resourceGroup $rg -subscriptionId $sub
-      $restMatch = Select-MachineMatch -enumerateResult $enum -vmDisplayName $vm
+      $enum = Get-ProjectMachinesRest -projectName $proj -resourceGroup $rg -subscriptionId $sub -diagDir $rowDiagDir
+      if ($DebugRaw -and $enum) { Save-Json -path (Join-Path $rowDiagDir "rest-migrateProjects-machines.json") -obj $enum -depth 8 }
+      $restMatch = $null
+      if ($enum -and $enum.value) {
+        # Try matching by displayName or discoveryData.machineName
+        foreach ($m in $enum.value) {
+          $disp = $m.properties.displayName
+          $discList = @($m.properties.discoveryData)
+          $discName = $null
+          if ($discList -and $discList.Count -gt 0) { $discName = $discList[0].machineName }
+          if ($disp -and $disp -eq $vm) { $restMatch = $m; break }
+          if ($discName -and $discName -eq $vm) { $restMatch = $m; break }
+          if ($m.name -eq $vm) { $restMatch = $m; break }
+        }
+      }
     }
 
+    # Optional: assessment API by machine name (last resort if we have the internal name)
+    $assess = $null
+    if (-not $cliObj -and -not $restMatch -and $DebugRaw) {
+      # Try with VMName as assessment machineName; if wrong, this just helps diagnostics
+      $assess = Get-AssessmentMachine -subscriptionId $sub -resourceGroup $rg -projectName $proj -machineName $vm -diagDir $rowDiagDir
+      if ($assess) { Save-Json -path (Join-Path $rowDiagDir "rest-assessment-machine.json") -obj $assess -depth 8 }
+    }
+
+    # Build enriched record
     $disc = $cliObj
     if (-not $disc -and $restMatch) { $disc = $restMatch }
+    if (-not $disc -and $assess)   { $disc = $assess }
 
     $osType=$null; $osName=$null; $bootType=$null; $cpuCount=$null; $memoryGB=$null; $diskSummary=$null
 
@@ -110,7 +165,7 @@ try {
       if ($props) {
         $bootType = $props.bootType
         $osName   = $props.osName
-        $discList = @($props.discoveryData)  # normalize
+        $discList = @($props.discoveryData)
         if ($discList -and $discList.Count -gt 0) {
           $dd = $discList[0]
           $osType = $dd.osType
@@ -127,6 +182,7 @@ try {
     $source = "None"
     if ($cliObj)      { $source = "CLI:migrate/local" }
     elseif ($restMatch){ $source = "REST:migrateProjects" }
+    elseif ($assess)   { $source = "REST:assessmentProjects" }
 
     $out = [PSCustomObject]@{
       Intake = [PSCustomObject]@{
@@ -161,14 +217,17 @@ try {
     $outObjects.Add($out) | Out-Null
 
     if (-not $disc) {
-      Write-Warn "No discovered data found for VM '$vm' in project '$proj'. Check appliance sync or VM naming."
+      Write-Warn "No discovered data found for VM '$vm' in project '$proj'. Check appliance sync or VM naming. See diagnostics folder: $rowDiagDir"
+    } else {
+      Write-Info "Discovered VM '$vm' via $source"
     }
   }
 
   $outFile = Join-Path $OutputFolder "discovery-output.json"
-  $outObjects | ConvertTo-Json -Depth 6 | Out-File -FilePath $outFile -Encoding UTF8
+  $outObjects | ConvertTo-Json -Depth 8 | Out-File -FilePath $outFile -Encoding UTF8
   Write-Info ("Discovery complete. Records: " + $outObjects.Count)
   Write-Info ("Saved file: $outFile")
+  if ($DebugRaw) { Write-Info ("Diagnostics saved under: " + $diagDir) }
 }
 catch {
   Write-Err ("Fatal error in discovery-physical: " + $_.ToString())

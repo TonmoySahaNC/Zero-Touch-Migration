@@ -26,19 +26,16 @@ $requiredColumns = @(
 )
 
 function Test-Columns($rows) {
-  # Normalize rows to array; pick a safe sample
-  $arr = @($rows)
-  write-info "Arr " $arr
+  $arr = @($rows) # normalize
   if ($arr.Count -eq 0) { throw "Input CSV has no rows." }
   $sample  = $arr[0]
   $present = $sample.PSObject.Properties.Name
   $missing = $requiredColumns | Where-Object { $_ -notin $present }
-  if ($missing.Count -gt 0) { throw ("Input CSV missing required columns: " + ($missing -join ", ")) }
+  if ($missing -and @($missing).Count -gt 0) { throw ("Input CSV missing required columns: " + ((@($missing)) -join ", ")) }
 }
 
 function Get-DiscoveredServerCli([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$vmDisplayName) {
   if ($subscriptionId -and $subscriptionId.Trim() -ne "") { az account set --subscription $subscriptionId | Out-Null }
-  # Azure CLI 'migrate' extension (auto-installs on first use); get by display name
   $cmd = @("migrate","local","get-discovered-server",
            "--project-name",$projectName,"--resource-group",$resourceGroup,
            "--display-name",$vmDisplayName,"--subscription",$subscriptionId)
@@ -48,7 +45,6 @@ function Get-DiscoveredServerCli([string]$projectName,[string]$resourceGroup,[st
 }
 
 function Get-ProjectMachinesRest([string]$projectName,[string]$resourceGroup,[string]$subscriptionId) {
-  # Fallback enumeration via REST (Microsoft.Migrate/migrateProjects/.../machines)
   $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
   $json = az rest --method get --url "https://management.azure.com$uri" --output json --only-show-errors 2>$null
   if ($json) { return ($json | ConvertFrom-Json) }
@@ -59,7 +55,7 @@ function Select-MachineMatch($enumerateResult,[string]$vmDisplayName) {
   if (-not $enumerateResult -or -not $enumerateResult.value) { return $null }
   foreach ($m in $enumerateResult.value) {
     $disp     = $m.properties.displayName
-    $discList = $m.properties.discoveryData
+    $discList = @($m.properties.discoveryData)  # normalize singletons
     $discName = $null
     if ($discList -and $discList.Count -gt 0) { $discName = $discList[0].machineName }
     if ($disp -and $disp -eq $vmDisplayName) { return $m }
@@ -77,10 +73,7 @@ try {
   if (-not (Test-Path $InputCsv)) { throw "Input CSV not found: $InputCsv" }
   if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
-  $rows = Import-Csv -Path $InputCsv
-  # Normalize single PSCustomObject to array
-  $rows = @($rows)
-  write-info "Rows " $rows
+  $rows = @((Import-Csv -Path $InputCsv))   # normalize single object => array
   if ($rows.Count -eq 0) { throw "Input CSV is empty: $InputCsv" }
   Test-Columns -rows $rows
 
@@ -99,17 +92,14 @@ try {
 
     if ($Detailed) { Write-Info "Discovering VM '$vm' in project '$proj' (RG: $rg, Sub: $sub)..." }
 
-    # Primary: CLI discovered server
     $cliObj = Get-DiscoveredServerCli -projectName $proj -resourceGroup $rg -subscriptionId $sub -vmDisplayName $vm
 
-    # Fallback: enumerate via REST
     $restMatch = $null
     if (-not $cliObj) {
       $enum = Get-ProjectMachinesRest -projectName $proj -resourceGroup $rg -subscriptionId $sub
       $restMatch = Select-MachineMatch -enumerateResult $enum -vmDisplayName $vm
     }
 
-    # Build enriched record
     $disc = $cliObj
     if (-not $disc -and $restMatch) { $disc = $restMatch }
 
@@ -120,8 +110,9 @@ try {
       if ($props) {
         $bootType = $props.bootType
         $osName   = $props.osName
-        if ($props.discoveryData -and $props.discoveryData.Count -gt 0) {
-          $dd = $props.discoveryData[0]
+        $discList = @($props.discoveryData)  # normalize
+        if ($discList -and $discList.Count -gt 0) {
+          $dd = $discList[0]
           $osType = $dd.osType
           if ($dd.extendedInfo) {
             $cpuCount    = $dd.extendedInfo.cpuCount
@@ -183,5 +174,4 @@ catch {
   Write-Err ("Fatal error in discovery-physical: " + $_.ToString())
   exit 1
 }
-
 

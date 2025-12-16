@@ -1,40 +1,57 @@
-
 <#
-  v122 Business Application Mapping (parameterless)
-  - Robust counts with Measure-Object; prints summary; saves diagnostic copy
+  v122.1 business-mapping.ps1
+  - Depth increased to 12 for JSON serialization to avoid truncation warnings
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 function Write-Info($msg) { Write-Host ("[INFO] " + $msg) }
 function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
-$DiscoveryFile = $env:MIG_DISCOVERY_FILE
-$OutputFolder  = $env:MIG_OUTPUT_DIR
-$Detailed      = ($env:MIG_DETAILED -eq 'true')
-$DebugRaw      = ($env:MIG_DEBUG_RAW -eq 'true')
-try{
-  Write-Info '========== business-mapping.ps1 =========='
-  Write-Info "DiscoveryFile: $DiscoveryFile"
-  Write-Info "OutputFolder : $OutputFolder"
-  if(-not(Test-Path $DiscoveryFile)){ throw "Discovery file not found: $DiscoveryFile" }
-  if(-not(Test-Path $OutputFolder)){ New-Item -ItemType Directory -Path $OutputFolder -Force|Out-Null }
-  $records = Get-Content -Path $DiscoveryFile -Raw | ConvertFrom-Json
-  if(-not $records){ throw "Discovery output is empty: $DiscoveryFile" }
-  if($records -isnot [System.Collections.IEnumerable]){ $records=@($records) }
-  $records=@($records)
-  $diagPath = Join-Path $OutputFolder 'raw'
-  if(-not(Test-Path $diagPath)){ New-Item -ItemType Directory -Path $diagPath -Force|Out-Null }
-  ($records|ConvertTo-Json -Depth 8)|Out-File -FilePath (Join-Path $diagPath 'discovery-output-copy.json') -Encoding UTF8
-  Write-Info "Saved diagnostic copy: $diagPath\discovery-output-copy.json"
-  $apps=@{}
-  foreach($rec in $records){ $app=$rec.Intake.BusinessApplicationName; if(-not $app -or $app.Trim() -eq ''){ $app='__UNASSIGNED__' }; if(-not $apps.ContainsKey($app)){ $apps[$app]=New-Object System.Collections.Generic.List[object] }; $apps[$app].Add($rec)|Out-Null }
-  $out=New-Object System.Collections.Generic.List[object]
-  foreach($k in $apps.Keys){ $list=$apps[$k]; $vmNames=($list|ForEach-Object {$_.Intake.VMName}); $found=($list|Where-Object { $_.Discovery -and $_.Discovery.FoundInAzureMigrate }|Measure-Object).Count; $total=($list|Measure-Object).Count; $obj=[PSCustomObject]@{ BusinessApplicationName=$k; VMCount=$total; DiscoveredCount=$found; VMNames=$vmNames; Items=$list }; $out.Add($obj)|Out-Null }
-  Write-Info 'Application summary:'
-  foreach($o in $out){ Write-Info (" - " + $o.BusinessApplicationName + ": " + $o.DiscoveredCount + "/" + $o.VMCount + " discovered") }
-  $outFile = Join-Path $OutputFolder 'mapping-output.json'
-  $out|ConvertTo-Json -Depth 6|Out-File -FilePath $outFile -Encoding UTF8
-  Write-Info ("Business mapping complete. Applications: " + (($apps.Keys|Measure-Object).Count))
-  Write-Info ("Saved file: $outFile")
+
+try {
+  Write-Info "========== business-mapping.ps1 =========="
+  $discFile = $env:MIG_DISCOVERY_FILE
+  $outDir   = $env:MIG_OUTPUT_DIR
+  if (-not $discFile -or -not (Test-Path $discFile)) { throw "Discovery file not found: $discFile" }
+  if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+
+  Write-Info "DiscoveryFile: $discFile"
+  Write-Info "OutputFolder : $outDir"
+
+  $rawDir = Join-Path $outDir 'raw'
+  if (-not (Test-Path $rawDir)) { New-Item -ItemType Directory -Path $rawDir -Force | Out-Null }
+
+  $rows = Get-Content -Path $discFile -Raw | ConvertFrom-Json
+  ($rows | ConvertTo-Json -Depth 12) | Out-File -FilePath (Join-Path $rawDir 'discovery-output-copy.json') -Encoding UTF8
+  Write-Info ("Saved diagnostic copy: " + (Join-Path $outDir 'raw' 'discovery-output-copy.json'))
+
+  $apps = @{}
+  foreach ($r in $rows) {
+    $app = $r.Intake.BusinessApplicationName
+    if (-not $apps.ContainsKey($app)) {
+      $apps[$app] = [PSCustomObject]@{
+        BusinessApplicationName = $app
+        VMCount         = 0
+        DiscoveredCount = 0
+        VMNames         = New-Object System.Collections.Generic.List[string]
+        Items           = New-Object System.Collections.Generic.List[object]
+      }
+    }
+    $apps[$app].VMCount++
+    if ($r.Discovery.FoundInAzureMigrate) { $apps[$app].DiscoveredCount++ }
+    [void]$apps[$app].VMNames.Add($r.Intake.VMName)
+    [void]$apps[$app].Items.Add($r)
+  }
+
+  $result = New-Object System.Collections.Generic.List[object]
+  foreach ($k in $apps.Keys) { $result.Add($apps[$k]) | Out-Null }
+
+  $outFile = Join-Path $outDir 'mapping-output.json'
+  ($result | ConvertTo-Json -Depth 12) | Out-File -FilePath $outFile -Encoding UTF8
+
+  Write-Info "Application summary:"
+  foreach ($a in $result) { Write-Info (" - " + $a.BusinessApplicationName + ": " + $a.DiscoveredCount + "/" + $a.VMCount + " discovered") }
+  Write-Info ("Business mapping complete. Applications: " + (($result | Measure-Object).Count))
+  Write-Info ("Saved file: " + $outFile)
 }
-catch{ Write-Err ("Fatal error in business-mapping: " + $_.ToString()); exit 1 }
+catch { Write-Err "Fatal error in business-mapping: $($_.Exception.Message)"; exit 1 }
 

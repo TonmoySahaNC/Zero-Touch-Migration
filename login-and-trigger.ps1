@@ -1,4 +1,3 @@
-
 param(
   [switch]$UseServicePrincipal,
   [string]$InputCsv            = ".\migration_input.csv",
@@ -60,13 +59,24 @@ try {
   $env:MIG_VERBOSE_LOG = ($VerboseLog.IsPresent ? "true" : "false")
 
   Write-Info "Starting Discovery phase..."
-  & $DiscoveryScriptPath -InputCsv $InputCsv -OutputFolder $OutputFolder -Detailed:$VerboseLog
+  # Spawn new PowerShell process to avoid inherited common parameter collisions (e.g., -Verbose twice)
+  $discArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Resolve-Path $DiscoveryScriptPath).Path,
+                '-InputCsv', (Resolve-Path $InputCsv).Path,
+                '-OutputFolder', (Resolve-Path $OutputFolder).Path)
+  if ($VerboseLog) { $discArgs += @('-Detailed') }
+  $disc = Start-Process -FilePath 'powershell' -ArgumentList $discArgs -NoNewWindow -Wait -PassThru
+  if ($disc.ExitCode -ne 0) { throw "Discovery phase failed (exit code $($disc.ExitCode))." }
 
   $discFile = Join-Path $OutputFolder "discovery-output.json"
   if (-not (Test-Path $discFile)) { throw "Discovery output missing: $discFile" }
 
   Write-Info "Starting Business Application Mapping phase..."
-  & $MappingScriptPath -DiscoveryFile $discFile -OutputFolder $OutputFolder -Detailed:$VerboseLog
+  $mapArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Resolve-Path $MappingScriptPath).Path,
+               '-DiscoveryFile', (Resolve-Path $discFile).Path,
+               '-OutputFolder', (Resolve-Path $OutputFolder).Path)
+  if ($VerboseLog) { $mapArgs += @('-Detailed') }
+  $map = Start-Process -FilePath 'powershell' -ArgumentList $mapArgs -NoNewWindow -Wait -PassThru
+  if ($map.ExitCode -ne 0) { throw "Business mapping phase failed (exit code $($map.ExitCode))." }
 
   Write-Info "login-and-trigger finished successfully."
 }
@@ -74,3 +84,4 @@ catch {
   Write-Err "Fatal error in login-and-trigger: $($_.Exception.Message)"
   exit 1
 }
+

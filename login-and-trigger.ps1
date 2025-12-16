@@ -1,4 +1,3 @@
-
 <#
 .SYNOPSIS
   Logs in to Azure (SPN or interactive), validates prerequisites, and triggers Discovery + Business Application Mapping.
@@ -11,14 +10,14 @@
   - Calls discovery-physical.ps1, then business-mapping.ps1.
 
 .NOTES
-  Assumes Azure CLI is available on the GitHub runner (standard Microsoft-hosted images have az installed).
-  Discovery uses 'az migrate local get-discovered-server' for project machines (migrate extension). See Microsoft Learn.  # ref: turn3search12, turn3search4
+  Assumes Azure CLI is available on the runner/host.
+  Discovery uses 'az migrate local get-discovered-server' (Azure CLI migrate extension).
 #>
 
 param(
   [switch]$UseServicePrincipal,
   [string]$InputCsv            = ".\migration_input.csv",
-  [string]$SubscriptionId      = "",  # optional override
+  [string]$SubscriptionId      = "",
   [string]$DiscoveryScriptPath = ".\discovery-physical.ps1",
   [string]$MappingScriptPath   = ".\business-mapping.ps1",
   [string]$OutputFolder        = ".\out",
@@ -28,15 +27,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Write-Info($msg) {
-  Write-Host ("[INFO] " + $msg)
-}
-function Write-Warn($msg) {
-  Write-Warning ("[WARN] " + $msg)
-}
-function Write-Err($msg) {
-  Write-Error ("[ERROR] " + $msg)
-}
+function Write-Info($msg) { Write-Host ("[INFO] " + $msg) }
+function Write-Warn($msg) { Write-Warning ("[WARN] " + $msg) }
+function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
 
 try {
   Write-Info "========== login-and-trigger.ps1 =========="
@@ -63,7 +56,7 @@ try {
     az account set --subscription $SubscriptionId
   }
 
-  # Ensure migrate extension exists (auto-installs first time). See Microsoft Learn. # ref: turn3search4
+  # Ensure migrate extension exists (auto-installs first time if missing)
   $ext = az extension show --name migrate --only-show-errors 2>$null
   if (-not $ext) {
     Write-Info "Azure CLI 'migrate' extension missing. Installing..."
@@ -100,5 +93,5 @@ try {
 catch {
   Write-Err "Fatal error in login-and-trigger: $($_.Exception.Message)"
   exit 1
-  }
+}
 

@@ -1,14 +1,11 @@
 <#
-  v129.1 Discovery (parameterless)
-  - Quote the --url in 'az rest' to prevent '&' splitting on Windows shells
-  - REST-first inventory with pagination (nextLink/continuationToken; pageSize=100)
-  - StrictMode-safe counting & manifest
-  - DNSName-aware post-processing join
-  - NEW: Enrich join fields from discoveryData.extendedInfo and osName
-        * OSName fallback: discoveryData[0].osName when properties.osName is null
-        * BootType from extendedInfo.bootType
-        * CPUCount from extendedInfo.memoryDetails.NumberOfProcessorCore
-        * MemoryGB from extendedInfo.memoryDetails.AllocatedMemoryInMB / 1024 (rounded 2 decimals)
+  v129.2 Discovery
+  - Quoted 'az rest --url' (Windows '&' safe)
+  - REST pagination (nextLink/continuationToken; pageSize=100)
+  - StrictMode-safe manifest
+  - DNSName-aware join
+  - NEW: Smart discoveryData selection (prefer non-empty bootType/osName; prioritize microsoftDiscovery=true)
+  - NEW: ConvertTo-Json depth=12 to avoid truncation warnings
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -19,7 +16,7 @@ function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
 function Get-Prop { param($Object,[string]$Name) if ($null -eq $Object) { return $null } $p=$Object.PSObject.Properties[$Name]; if($p){$p.Value}else{$null} }
 function Normalize-Name([string]$name){ if(-not $name){return $null } $n=$name.Trim().ToLower(); if($n.Contains('.')){ $n=$n.Split('.')[0] } return $n }
 function Save-Text($path,$text){ try{ $d=Split-Path $path; if(-not(Test-Path $d)){ New-Item -ItemType Directory -Path $d -Force|Out-Null }; $text|Out-File -FilePath $path -Encoding UTF8 }catch{ Write-Warn "Failed writing $path : $($_.Exception.Message)" }}
-function Save-Json($path,$obj,$depth=8){ try{ $json=$obj|ConvertTo-Json -Depth $depth; Save-Text -path $path -text $json }catch{ Write-Warn "Failed JSON save $path : $($_.Exception.Message)" }}
+function Save-Json($path,$obj,$depth=12){ try{ $json=$obj|ConvertTo-Json -Depth $depth; Save-Text -path $path -text $json }catch{ Write-Warn "Failed JSON save $path : $($_.Exception.Message)" }}
 
 function Invoke-AzRaw([string]$Url,[string]$RawOutPath){
   try{
@@ -75,7 +72,7 @@ if( ( $missing | Measure-Object ).Count -gt 0 ){
 
 $diagRoot = Join-Path $OutputFolder 'raw'
 if(-not(Test-Path $diagRoot)){ New-Item -ItemType Directory -Path $diagRoot -Force|Out-Null }
-if($DebugRaw){ Save-Json -path (Join-Path $diagRoot 'csv-rows.json') -obj $rows -depth 6 }
+if($DebugRaw){ Save-Json -path (Join-Path $diagRoot 'csv-rows.json') -obj $rows -depth 12 }
 
 $sets = @($rows | Select-Object -Property SrcSubscriptionId,SrcResourceGroup,MigrationProjectName -Unique)
 $inventoryCombined = New-Object System.Collections.Generic.List[object]
@@ -90,13 +87,13 @@ foreach($s in $sets){
   $allVals = Rest-EnumerateMachinesAll -sub $sub -rg $rg -proj $proj -diagDir $projDiag
   $inventoryBySet[$setKey] = $allVals
   foreach($m in $allVals){ $inventoryCombined.Add($m) | Out-Null }
-  Save-Json -path (Join-Path $projDiag "discovery-full-$proj.json") -obj $allVals -depth 8
+  Save-Json -path (Join-Path $projDiag "discovery-full-$proj.json") -obj $allVals -depth 12
   Write-Info ("Project '$proj' total machines: " + (($allVals|Measure-Object).Count))
 }
 
 $invDir = Join-Path $OutputFolder 'inventory'
 if(-not(Test-Path $invDir)){ New-Item -ItemType Directory -Path $invDir -Force|Out-Null }
-Save-Json -path (Join-Path $invDir 'discovery-full.json') -obj $inventoryCombined -depth 8
+Save-Json -path (Join-Path $invDir 'discovery-full.json') -obj $inventoryCombined -depth 12
 
 $flat = foreach($m in $inventoryCombined){
   $props = Get-Prop -Object $m -Name 'properties'
@@ -161,23 +158,36 @@ foreach($r in $rows){
     $bootType = Get-Prop -Object $props -Name 'bootType'
     $discList = @($(Get-Prop -Object $props -Name 'discoveryData'))
     if(($discList|Measure-Object).Count -gt 0){
-      $dd  = $discList[0]
+      # v129.2: smart selection of discoveryData entry
+      $candidate = $null
+      $cands = @()
+      foreach($d in $discList){
+        $ext = Get-Prop -Object $d -Name 'extendedInfo'
+        $hasBoot = $false
+        if($ext){ $bt = Get-Prop -Object $ext -Name 'bootType'; if($bt -and $bt.Trim() -ne ''){ $hasBoot = $true } }
+        if($d.osName -or $hasBoot){ $cands += $d }
+      }
+      if(($cands|Measure-Object).Count -gt 0){
+        # prefer microsoftDiscovery=true among candidates
+        $pref = @($cands | Where-Object { (Get-Prop -Object (Get-Prop -Object $_ -Name 'extendedInfo') -Name 'microsoftDiscovery') -eq 'true' })
+        if(($pref|Measure-Object).Count -gt 0){ $candidate = $pref[0] } else { $candidate = $cands[0] }
+      } else { $candidate = $discList[0] }
+
+      $dd = $candidate
       $osType = Get-Prop -Object $dd -Name 'osType'
       if(-not $osName){ $osName = Get-Prop -Object $dd -Name 'osName' }
-      $ext = Get-Prop -Object $dd -Name 'extendedInfo'
+      $ext    = Get-Prop -Object $dd -Name 'extendedInfo'
       if($ext){
         if(-not $bootType){ $bootType = Get-Prop -Object $ext -Name 'bootType' }
         $memDetailsText = Get-Prop -Object $ext -Name 'memoryDetails'
         if($memDetailsText){
-          try {
+          try{
             $memObj = $memDetailsText | ConvertFrom-Json
             $mb = Get-Prop -Object $memObj -Name 'AllocatedMemoryInMB'
             if($mb){ $memoryGB = [math]::Round([double]$mb/1024,2) }
             $cpu = Get-Prop -Object $memObj -Name 'NumberOfProcessorCore'
             if($cpu){ $cpuCount = $cpu }
-          } catch {
-            Write-Warn "Failed to parse memoryDetails JSON for '$($r.VMName)': $($_.Exception.Message)"
-          }
+          } catch { Write-Warn "Failed to parse memoryDetails JSON for '$($r.VMName)': $($_.Exception.Message)" }
         }
       }
     }
@@ -225,7 +235,7 @@ $joinCsv   = Join-Path $OutputFolder 'csv-to-discovery-join.csv'
 $fullJson  = Join-Path (Join-Path $OutputFolder 'inventory') 'discovery-full.json'
 $fullCsv   = Join-Path (Join-Path $OutputFolder 'inventory') 'discovery-full.csv'
 
-$outObjects | ConvertTo-Json -Depth 8 | Out-File -FilePath $outFile -Encoding UTF8
+$outObjects | ConvertTo-Json -Depth 12 | Out-File -FilePath $outFile -Encoding UTF8
 Write-Info ("Discovery complete. Records: "+ (($outObjects|Measure-Object).Count))
 Write-Info ("Saved file: $outFile")
 
@@ -260,7 +270,6 @@ $manifest = [ordered]@{
     FoundCount    = (($outObjects | Where-Object { $_.Discovery.FoundInAzureMigrate } | Measure-Object).Count)
   }
 }
-Save-Json -path (Join-Path $OutputFolder 'manifest.json') -obj $manifest -depth 6
+Save-Json -path (Join-Path $OutputFolder 'manifest.json') -obj $manifest -depth 12
 Write-Info ("Saved manifest: " + (Join-Path $OutputFolder 'manifest.json'))
 Write-Info ("Manifest summary -> Machines:" + $manifest.Inventory.Machines + ", Rows:" + $manifest.JoinResults.Rows + ", Found:" + $manifest.JoinResults.FoundCount)
-

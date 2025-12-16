@@ -41,6 +41,13 @@ try {
         Write-Warning "Unable to save token file: $($_.Exception.Message)"
     }
 
+    # Call discovery directly (no discovery script)
+    $replicationScript = ".\discovery-run.ps1"
+    if (-not (Test-Path $replicationScript)) {
+        Write-Error "Replication script not found at $replicationScript"
+        exit 1
+    }
+    
     # Call replication-run directly (no discovery script)
     $replicationScript = ".\replication-run.ps1"
     if (-not (Test-Path $replicationScript)) {

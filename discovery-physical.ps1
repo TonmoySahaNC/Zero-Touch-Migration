@@ -26,7 +26,11 @@ $requiredColumns = @(
 )
 
 function Test-Columns($rows) {
-  $present = $rows[0].PSObject.Properties.Name
+  # Normalize rows to array; pick a safe sample
+  $arr = @($rows)
+  if ($arr.Count -eq 0) { throw "Input CSV has no rows." }
+  $sample  = $arr[0]
+  $present = $sample.PSObject.Properties.Name
   $missing = $requiredColumns | Where-Object { $_ -notin $present }
   if ($missing.Count -gt 0) { throw ("Input CSV missing required columns: " + ($missing -join ", ")) }
 }
@@ -73,7 +77,9 @@ try {
   if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
   $rows = Import-Csv -Path $InputCsv
-  if (-not $rows -or $rows.Count -eq 0) { throw "Input CSV is empty: $InputCsv" }
+  # Normalize single PSCustomObject to array
+  $rows = @($rows)
+  if ($rows.Count -eq 0) { throw "Input CSV is empty: $InputCsv" }
   Test-Columns -rows $rows
 
   $srcSubs  = ($rows | Select-Object -ExpandProperty SrcSubscriptionId | Sort-Object -Unique)
@@ -175,4 +181,5 @@ catch {
   Write-Err ("Fatal error in discovery-physical: " + $_.ToString())
   exit 1
 }
+
 

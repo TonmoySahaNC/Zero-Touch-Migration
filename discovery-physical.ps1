@@ -1,9 +1,9 @@
 
 <# 
-  v120 Discovery (parameterless)
-  - REST-first enumerate machines; safe property access (no 'displayName' assumption)
-  - Name normalization for matching (trim, lowercase, strip domain)
-  - CLI used only for diagnostics; not required for success
+  v121 Discovery (parameterless)
+  - REST-first enumerate machines
+  - Safe property access to avoid StrictMode errors when fields are absent
+  - Name normalization for matching
 #>
 
 Set-StrictMode -Version Latest
@@ -12,6 +12,18 @@ $ErrorActionPreference = "Stop"
 function Write-Info($msg) { Write-Host ("[INFO] " + $msg) }
 function Write-Warn($msg) { Write-Warning ("[WARN] " + $msg) }
 function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
+
+# Safe property getter (handles missing fields under StrictMode)
+function Get-Prop {
+  param(
+    [Parameter(Mandatory=$true)]$Object,
+    [Parameter(Mandatory=$true)][string]$Name
+  )
+  if ($null -eq $Object) { return $null }
+  $p = $Object.PSObject.Properties[$Name]
+  if ($p) { return $p.Value }
+  return $null
+}
 
 $InputCsv    = $env:MIG_INPUT_CSV
 $OutputFolder= $env:MIG_OUTPUT_DIR
@@ -77,10 +89,12 @@ function Get-CandidateNames($machine) {
     if ($machine.name) { $null = $names.Add((Normalize-Name $machine.name)) }
     $props = $machine.properties
     if ($props) {
-      $discList = @($props.discoveryData)
+      $discList = @($(Get-Prop -Object $props -Name 'discoveryData'))
       foreach ($d in $discList) {
-        if ($d.machineName) { $null = $names.Add((Normalize-Name $d.machineName)) }
-        if ($d.fqdn)        { $null = $names.Add((Normalize-Name $d.fqdn)) }
+        $mn = Get-Prop -Object $d -Name 'machineName'
+        $fq = Get-Prop -Object $d -Name 'fqdn'
+        if ($mn) { $null = $names.Add((Normalize-Name $mn)) }
+        if ($fq) { $null = $names.Add((Normalize-Name $fq)) }
       }
     }
   } catch {}
@@ -135,7 +149,7 @@ try {
       }
     }
 
-    # CLI diag (try filtered; ignore failures)
+    # CLI diag (optional)
     if (-not $disc) {
       $cliArgs = @("migrate","local","get-discovered-server","--project-name",$proj,"--resource-group",$rg,"--display-name",$vm,"--subscription",$sub)
       $rawPath = Join-Path $rowDiagDir ("cli-" + $vm + "-with-filter.txt")
@@ -147,18 +161,19 @@ try {
     # Extract useful properties safely
     $osType=$null; $osName=$null; $bootType=$null; $cpuCount=$null; $memoryGB=$null; $diskSummary=$null
     if ($disc) {
-      $props = $disc.properties
+      $props = Get-Prop -Object $disc -Name 'properties'
       if ($props) {
-        $bootType = $props.bootType
-        $osName   = $props.osName
-        $discList = @($props.discoveryData)
+        $bootType = Get-Prop -Object $props -Name 'bootType'
+        $osName   = Get-Prop -Object $props -Name 'osName'
+        $discList = @($(Get-Prop -Object $props -Name 'discoveryData'))
         if ($discList -and $discList.Count -gt 0) {
           $dd = $discList[0]
-          $osType = $dd.osType
-          if ($dd.extendedInfo) {
-            $cpuCount    = $dd.extendedInfo.cpuCount
-            $memoryGB    = $dd.extendedInfo.memoryInGB
-            $diskSummary = $dd.extendedInfo.diskSummary
+          $osType = Get-Prop -Object $dd -Name 'osType'
+          $ext    = Get-Prop -Object $dd -Name 'extendedInfo'
+          if ($ext) {
+            $cpuCount    = Get-Prop -Object $ext -Name 'cpuCount'
+            $memoryGB    = Get-Prop -Object $ext -Name 'memoryInGB'
+            $diskSummary = Get-Prop -Object $ext -Name 'diskSummary'
           }
         }
       }

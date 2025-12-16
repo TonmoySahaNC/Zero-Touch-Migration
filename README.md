@@ -1,19 +1,20 @@
 
-# Zero-Touch Migration – v129.1 package (surgical)
+# Zero-Touch Migration – v129.2 package (surgical)
 
-This bundle contains:
+**Changes from v129.1**
+- Smart `discoveryData` selection in join (prefer entries with non-empty `bootType`/`osName`; prioritize `microsoftDiscovery=true`).
+- JSON serialization depth increased to **12** (avoid truncation warnings in logs/files).
 
-- **login-and-trigger.ps1 (v129)** – prefers **pwsh**; quotes `-File` paths; sets WorkingDirectory; no ternaries.
-- **discovery-physical.ps1 (v129.1)** – quoted `az rest --url`; REST pagination; DNSName matching; StrictMode-safe manifest; **enriched join fields** (OSName fallback; BootType/CPU/Memory from `extendedInfo`).
-- **business-mapping.ps1 (v122)** – reads `MIG_DISCOVERY_FILE`, writes diagnostic copy, aggregates by BusinessApplicationName.
+**Includes**
+- `login-and-trigger.ps1` (v129)
+- `discovery-physical.ps1` (v129.2)
+- `business-mapping.ps1` (v122.1)
 
-## Usage
+**Usage**
 ```powershell
-Expand-Archive .\ztm-full-v129.1.zip -DestinationPath .
+Expand-Archive .\ztm-full-v129.2.zip -DestinationPath .
 
-# Service Principal login expected if -UseServicePrincipal is provided
-.
-login-and-trigger.ps1 `
+.\login-and-trigger.ps1 `
   -UseServicePrincipal `
   -InputCsv .\migration_input.csv `
   -Mode DryRun `
@@ -22,13 +23,5 @@ login-and-trigger.ps1 `
   -OutputFolder .\out
 ```
 
-## Outputs
-- `out\inventory\discovery-full.json|.csv` – full paginated inventory
-- `out\discovery-output.json` – join results (now includes OSName/BootType/CPUCount/MemoryGB)
-- `out\csv-to-discovery-join.csv` – human-friendly join summary
-- `out\manifest.json` – exact paths and counts; console prints `Manifest summary -> ...`
-- `out\mapping-output.json` – Business Application summary
+Outputs are identical to v129.1, with richer join fields and no depth warnings.
 
-## Notes
-- Quoting the URL is necessary to prevent Windows shells from splitting `&pageSize=100` (command separator).
-- Azure Migrate `Machines—Enumerate` is paginated via `nextLink/continuationToken`; v129.1 follows all pages by default.

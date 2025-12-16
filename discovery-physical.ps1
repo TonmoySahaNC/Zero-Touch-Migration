@@ -1,10 +1,10 @@
 
 <#
-  v128 Discovery (parameterless)
-  - Compatible with Windows PowerShell 5.1 (no ternary operator)
-  - REST-first inventory per unique project with pagination (nextLink/continuationToken; pageSize=100)
+  v129 Discovery (parameterless)
+  - Quote the --url argument when calling 'az rest' to prevent '&' splitting on Windows shells
+  - REST-first inventory with pagination (nextLink/continuationToken; pageSize=100)
   - StrictMode-safe counting & manifest
-  - Post-processing join: matches CSV VMName and optionally DNSName to inventory candidates (name/machineName/fqdn)
+  - DNSName-aware post-processing join
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -16,7 +16,20 @@ function Get-Prop { param($Object,[string]$Name) if ($null -eq $Object) { return
 function Normalize-Name([string]$name){ if(-not $name){return $null } $n=$name.Trim().ToLower(); if($n.Contains('.')){ $n=$n.Split('.')[0] } return $n }
 function Save-Text($path,$text){ try{ $d=Split-Path $path; if(-not(Test-Path $d)){ New-Item -ItemType Directory -Path $d -Force|Out-Null }; $text|Out-File -FilePath $path -Encoding UTF8 }catch{ Write-Warn "Failed writing $path : $($_.Exception.Message)" }}
 function Save-Json($path,$obj,$depth=8){ try{ $json=$obj|ConvertTo-Json -Depth $depth; Save-Text -path $path -text $json }catch{ Write-Warn "Failed JSON save $path : $($_.Exception.Message)" }}
-function Invoke-AzRaw([string]$Url,[string]$RawOutPath){ try{ $cmdArgs=@('rest','--method','get','--url',$Url); Write-Info ("Running: az " + ($cmdArgs -join ' ')); $res = & az @cmdArgs 2>&1; $text = ($res | Out-String); if($RawOutPath){ Save-Text -path $RawOutPath -text $text }; try{ return ($text | ConvertFrom-Json) } catch { Write-Warn "JSON parse failed for: $Url"; return $null } } catch { Write-Warn "az failed: $($_.Exception.Message)"; return $null } }
+
+function Invoke-AzRaw([string]$Url,[string]$RawOutPath){
+  try{
+    $quotedUrl = '"' + $Url + '"'  # ensure '&' in query stays inside
+    $cmdArgs = @('rest','--method','get','--url',$quotedUrl)
+    Write-Info ("Running: az " + ($cmdArgs -join ' '))
+    $res = & az @cmdArgs 2>&1
+    $text = ($res | Out-String)
+    if($RawOutPath){ Save-Text -path $RawOutPath -text $text }
+    try { return ($text | ConvertFrom-Json) } catch { Write-Warn "JSON parse failed for: $Url"; return $null }
+  } catch {
+    Write-Warn "az failed: $($_.Exception.Message)"; return $null
+  }
+}
 
 function Rest-EnumerateMachinesAll([string]$sub,[string]$rg,[string]$proj,[string]$diagDir){
   $base = "https://management.azure.com/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.Migrate/migrateProjects/$proj/machines?api-version=2018-09-01-preview&pageSize=100"
@@ -153,7 +166,6 @@ foreach($r in $rows){
     }
   }
 
-  # Precompute DNSName value (no ternary in hashtables)
   $dnsValue = $null
   if ($r.PSObject.Properties['DNSName']) { $dnsValue = $r.DNSName }
 

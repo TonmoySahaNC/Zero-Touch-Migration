@@ -28,7 +28,7 @@ $requiredColumns = @(
 function Test-Columns($rows) {
   # Normalize rows to array; pick a safe sample
   $arr = @($rows)
-  write-info $arr
+  write-info "Arr " $arr
   if ($arr.Count -eq 0) { throw "Input CSV has no rows." }
   $sample  = $arr[0]
   $present = $sample.PSObject.Properties.Name
@@ -80,6 +80,7 @@ try {
   $rows = Import-Csv -Path $InputCsv
   # Normalize single PSCustomObject to array
   $rows = @($rows)
+  write-info "Rows " $rows
   if ($rows.Count -eq 0) { throw "Input CSV is empty: $InputCsv" }
   Test-Columns -rows $rows
 

@@ -7,12 +7,6 @@
   - Reads discovery-output.json.
   - Groups by BusinessApplicationName.
   - Emits mapping-output.json with per-app VM list and basic stats.
-
-.PARAMETER DiscoveryFile
-  Path to discovery-output.json produced by discovery-physical.ps1.
-
-.PARAMETER OutputFolder
-  Directory for outputs (mapping-output.json).
 #>
 
 param(
@@ -39,9 +33,9 @@ try {
   }
 
   $records = Get-Content -Path $DiscoveryFile -Raw | ConvertFrom-Json
-  if (-not $records -or $records.Count -eq 0) { throw "Discovery output is empty: $DiscoveryFile" }
+  if (-not $records) { throw "Discovery output is empty: $DiscoveryFile" }
+  if ($records -isnot [System.Collections.IEnumerable]) { $records = @($records) }
 
-  # Group by BusinessApplicationName
   $apps = @{}
   foreach ($rec in $records) {
     $app = $rec.Intake.BusinessApplicationName
@@ -50,7 +44,6 @@ try {
     $apps[$app].Add($rec) | Out-Null
   }
 
-  # Build mapping output
   $out = New-Object System.Collections.Generic.List[object]
   foreach ($k in $apps.Keys) {
     $list = $apps[$k]
@@ -76,3 +69,4 @@ catch {
   Write-Err ("Fatal error in business-mapping: " + $_.ToString())
   exit 1
 }
+

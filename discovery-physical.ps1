@@ -1,10 +1,14 @@
-
 <#
-  v129 Discovery (parameterless)
-  - Quote the --url argument when calling 'az rest' to prevent '&' splitting on Windows shells
+  v129.1 Discovery (parameterless)
+  - Quote the --url in 'az rest' to prevent '&' splitting on Windows shells
   - REST-first inventory with pagination (nextLink/continuationToken; pageSize=100)
   - StrictMode-safe counting & manifest
   - DNSName-aware post-processing join
+  - NEW: Enrich join fields from discoveryData.extendedInfo and osName
+        * OSName fallback: discoveryData[0].osName when properties.osName is null
+        * BootType from extendedInfo.bootType
+        * CPUCount from extendedInfo.memoryDetails.NumberOfProcessorCore
+        * MemoryGB from extendedInfo.memoryDetails.AllocatedMemoryInMB / 1024 (rounded 2 decimals)
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -19,16 +23,14 @@ function Save-Json($path,$obj,$depth=8){ try{ $json=$obj|ConvertTo-Json -Depth $
 
 function Invoke-AzRaw([string]$Url,[string]$RawOutPath){
   try{
-    $quotedUrl = '"' + $Url + '"'  # ensure '&' in query stays inside
+    $quotedUrl = '"' + $Url + '"'
     $cmdArgs = @('rest','--method','get','--url',$quotedUrl)
     Write-Info ("Running: az " + ($cmdArgs -join ' '))
     $res = & az @cmdArgs 2>&1
     $text = ($res | Out-String)
     if($RawOutPath){ Save-Text -path $RawOutPath -text $text }
     try { return ($text | ConvertFrom-Json) } catch { Write-Warn "JSON parse failed for: $Url"; return $null }
-  } catch {
-    Write-Warn "az failed: $($_.Exception.Message)"; return $null
-  }
+  } catch { Write-Warn "az failed: $($_.Exception.Message)"; return $null }
 }
 
 function Rest-EnumerateMachinesAll([string]$sub,[string]$rg,[string]$proj,[string]$diagDir){
@@ -108,8 +110,8 @@ $flat = foreach($m in $inventoryCombined){
     disc_osType   = Get-Prop -Object $first -Name 'osType'
     disc_machine  = Get-Prop -Object $first -Name 'machineName'
     disc_fqdn     = Get-Prop -Object $first -Name 'fqdn'
-    disc_cpuCount = Get-Prop -Object (Get-Prop -Object $first -Name 'extendedInfo') -Name 'cpuCount'
-    disc_memoryGB = Get-Prop -Object (Get-Prop -Object $first -Name 'extendedInfo') -Name 'memoryInGB'
+    disc_cpuCount = $null
+    disc_memoryGB = $null
   }
 }
 $flat | Export-Csv -Path (Join-Path $invDir 'discovery-full.csv') -NoTypeInformation -Encoding UTF8
@@ -155,14 +157,29 @@ foreach($r in $rows){
   $osType=$null; $osName=$null; $bootType=$null; $cpuCount=$null; $memoryGB=$null; $diskSummary=$null
   if($match){
     $props = Get-Prop -Object $match -Name 'properties'
-    $bootType = Get-Prop -Object $props -Name 'bootType'
     $osName   = Get-Prop -Object $props -Name 'osName'
+    $bootType = Get-Prop -Object $props -Name 'bootType'
     $discList = @($(Get-Prop -Object $props -Name 'discoveryData'))
     if(($discList|Measure-Object).Count -gt 0){
-      $dd = $discList[0]
+      $dd  = $discList[0]
       $osType = Get-Prop -Object $dd -Name 'osType'
-      $ext    = Get-Prop -Object $dd -Name 'extendedInfo'
-      if($ext){ $cpuCount=Get-Prop -Object $ext -Name 'cpuCount'; $memoryGB=Get-Prop -Object $ext -Name 'memoryInGB'; $diskSummary=Get-Prop -Object $ext -Name 'diskSummary' }
+      if(-not $osName){ $osName = Get-Prop -Object $dd -Name 'osName' }
+      $ext = Get-Prop -Object $dd -Name 'extendedInfo'
+      if($ext){
+        if(-not $bootType){ $bootType = Get-Prop -Object $ext -Name 'bootType' }
+        $memDetailsText = Get-Prop -Object $ext -Name 'memoryDetails'
+        if($memDetailsText){
+          try {
+            $memObj = $memDetailsText | ConvertFrom-Json
+            $mb = Get-Prop -Object $memObj -Name 'AllocatedMemoryInMB'
+            if($mb){ $memoryGB = [math]::Round([double]$mb/1024,2) }
+            $cpu = Get-Prop -Object $memObj -Name 'NumberOfProcessorCore'
+            if($cpu){ $cpuCount = $cpu }
+          } catch {
+            Write-Warn "Failed to parse memoryDetails JSON for '$($r.VMName)': $($_.Exception.Message)"
+          }
+        }
+      }
     }
   }
 
@@ -245,5 +262,5 @@ $manifest = [ordered]@{
 }
 Save-Json -path (Join-Path $OutputFolder 'manifest.json') -obj $manifest -depth 6
 Write-Info ("Saved manifest: " + (Join-Path $OutputFolder 'manifest.json'))
-Write-Info ("Manifest summary ⇒ Machines:" + $manifest.Inventory.Machines + ", Rows:" + $manifest.JoinResults.Rows + ", Found:" + $manifest.JoinResults.FoundCount)
+Write-Info ("Manifest summary -> Machines:" + $manifest.Inventory.Machines + ", Rows:" + $manifest.JoinResults.Rows + ", Found:" + $manifest.JoinResults.FoundCount)
 

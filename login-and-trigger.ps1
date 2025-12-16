@@ -99,5 +99,5 @@ try {
 }
 catch {
   Write-Err "Fatal error in login-and-trigger: $($_.Exception.Message)"
-  exit 1  exit 1
+  exit 1
 

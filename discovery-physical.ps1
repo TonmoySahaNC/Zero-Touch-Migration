@@ -1,9 +1,10 @@
 
 <#
-  v127 Discovery (parameterless)
+  v128 Discovery (parameterless)
+  - Compatible with Windows PowerShell 5.1 (no ternary operator)
   - REST-first inventory per unique project with pagination (nextLink/continuationToken; pageSize=100)
   - StrictMode-safe counting & manifest
-  - Post-processing join: matches CSV VMName and optionally CSV DNSName to inventory candidates (name/machineName/fqdn)
+  - Post-processing join: matches CSV VMName and optionally DNSName to inventory candidates (name/machineName/fqdn)
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -127,9 +128,13 @@ foreach($r in $rows){
       if($mn){ $null = $names.Add($mn) }
       if($fq){ $null = $names.Add($fq) }
     }
-    if($names.Contains($csvNorm) -or ($csvDns -and $names.Contains($csvDns))){
+    if($names.Contains($csvNorm)){
       $match=$m
-      $matchReason = $names.Contains($csvNorm) ? 'name|machineName|fqdn' : 'DNSName=>fqdn|machineName'
+      $matchReason='name|machineName|fqdn'
+      break
+    } elseif($csvDns -and $names.Contains($csvDns)){
+      $match=$m
+      $matchReason='DNSName=>fqdn|machineName'
       break
     }
   }
@@ -148,6 +153,10 @@ foreach($r in $rows){
     }
   }
 
+  # Precompute DNSName value (no ternary in hashtables)
+  $dnsValue = $null
+  if ($r.PSObject.Properties['DNSName']) { $dnsValue = $r.DNSName }
+
   $out = [PSCustomObject]@{
     Intake = [PSCustomObject]@{
       MigrationType              = $r.MigrationType
@@ -164,7 +173,7 @@ foreach($r in $rows){
       AdminUsername              = $r.AdminUsername
       VMName                     = $r.VMName
       BusinessApplicationName    = $r.BusinessApplicationName
-      DNSName                    = ($r.PSObject.Properties['DNSName'] ? $r.DNSName : $null)
+      DNSName                    = $dnsValue
     }
     Discovery = [PSCustomObject]@{
       FoundInAzureMigrate = [bool]$match

@@ -28,6 +28,7 @@ $requiredColumns = @(
 function Test-Columns($rows) {
   # Normalize rows to array; pick a safe sample
   $arr = @($rows)
+  write-info $arr
   if ($arr.Count -eq 0) { throw "Input CSV has no rows." }
   $sample  = $arr[0]
   $present = $sample.PSObject.Properties.Name

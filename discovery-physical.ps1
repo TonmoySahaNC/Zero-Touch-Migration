@@ -1,28 +1,9 @@
 
-<#
-.SYNOPSIS
-  Discovery phase: read intake CSV, fetch Azure Migrate discovered VM data per project, and emit discovery-output.json.
-
-.DESCRIPTION
-  - Uses Azure CLI 'migrate' extension to get discovered servers by display name.
-  - Falls back to REST enumeration for project machines and name matching.
-
-.PARAMETER InputCsv
-  Path to migration_input.csv (with BusinessApplicationName, no AdminPassword).
-
-.PARAMETER OutputFolder
-  Directory for outputs (discovery-output.json).
-
-.NOTES
-  Requires 'az login' already performed and subscription context set (or inferred per row).
+<# 
+  Discovery phase (parameterless): 
+  Reads MIG_INPUT_CSV, MIG_OUTPUT_DIR, MIG_DETAILED from environment.
+  Collects discovered VM data from Azure Migrate and writes discovery-output.json.
 #>
-
-param(
-  [Parameter(Mandatory = $true)]
-  [string]$InputCsv,
-  [string]$OutputFolder = ".\out",
-  [switch]$Verbose
-)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -31,7 +12,12 @@ function Write-Info($msg) { Write-Host ("[INFO] " + $msg) }
 function Write-Warn($msg) { Write-Warning ("[WARN] " + $msg) }
 function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
 
-# Required CSV columns
+# --- Read environment ---
+$InputCsv    = $env:MIG_INPUT_CSV
+$OutputFolder= $env:MIG_OUTPUT_DIR
+$Detailed    = ($env:MIG_DETAILED -eq "true")
+
+# Required CSV columns (updated schema)
 $requiredColumns = @(
   "MigrationType","SrcSubscriptionId","SrcResourceGroup","MigrationProjectName",
   "TgtSubscriptionId","TgtResourceGroup","TgtVNet","TgtSubnet","TgtLocation",
@@ -42,47 +28,32 @@ $requiredColumns = @(
 function Test-Columns($rows) {
   $present = $rows[0].PSObject.Properties.Name
   $missing = $requiredColumns | Where-Object { $_ -notin $present }
-  if ($missing.Count -gt 0) {
-    throw ("Input CSV missing required columns: " + ($missing -join ", "))
-  }
+  if ($missing.Count -gt 0) { throw ("Input CSV missing required columns: " + ($missing -join ", ")) }
 }
 
-function Get-DiscoveredServerCli(
-  [string]$projectName,
-  [string]$resourceGroup,
-  [string]$subscriptionId,
-  [string]$vmDisplayName
-) {
-  if ($subscriptionId -and $subscriptionId.Trim() -ne "") {
-    az account set --subscription $subscriptionId | Out-Null
-  }
-  $cmd = @(
-    "migrate","local","get-discovered-server",
-    "--project-name", $projectName,
-    "--resource-group", $resourceGroup,
-    "--display-name", $vmDisplayName,
-    "--subscription", $subscriptionId
-  )
+function Get-DiscoveredServerCli([string]$projectName,[string]$resourceGroup,[string]$subscriptionId,[string]$vmDisplayName) {
+  if ($subscriptionId -and $subscriptionId.Trim() -ne "") { az account set --subscription $subscriptionId | Out-Null }
+  # Azure CLI 'migrate' extension (auto-installs on first use); get by display name
+  $cmd = @("migrate","local","get-discovered-server",
+           "--project-name",$projectName,"--resource-group",$resourceGroup,
+           "--display-name",$vmDisplayName,"--subscription",$subscriptionId)
   $json = az @cmd --only-show-errors 2>$null
   if ($json) { return ($json | ConvertFrom-Json) }
   return $null
 }
 
-function Get-ProjectMachinesRest(
-  [string]$projectName,
-  [string]$resourceGroup,
-  [string]$subscriptionId
-) {
+function Get-ProjectMachinesRest([string]$projectName,[string]$resourceGroup,[string]$subscriptionId) {
+  # Fallback enumeration via REST (Microsoft.Migrate/migrateProjects/.../machines)
   $uri = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Migrate/migrateProjects/$projectName/machines?api-version=2018-09-01-preview"
   $json = az rest --method get --url "https://management.azure.com$uri" --output json --only-show-errors 2>$null
   if ($json) { return ($json | ConvertFrom-Json) }
   return $null
 }
 
-function Select-MachineMatch($enumerateResult, [string]$vmDisplayName) {
+function Select-MachineMatch($enumerateResult,[string]$vmDisplayName) {
   if (-not $enumerateResult -or -not $enumerateResult.value) { return $null }
   foreach ($m in $enumerateResult.value) {
-    $disp = $m.properties.displayName
+    $disp     = $m.properties.displayName
     $discList = $m.properties.discoveryData
     $discName = $null
     if ($discList -and $discList.Count -gt 0) { $discName = $discList[0].machineName }
@@ -99,16 +70,13 @@ try {
   Write-Info "OutputFolder : $OutputFolder"
 
   if (-not (Test-Path $InputCsv)) { throw "Input CSV not found: $InputCsv" }
-  if (-not (Test-Path $OutputFolder)) {
-    Write-Info "Creating output folder: $OutputFolder"
-    New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
-  }
+  if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
   $rows = Import-Csv -Path $InputCsv
   if (-not $rows -or $rows.Count -eq 0) { throw "Input CSV is empty: $InputCsv" }
   Test-Columns -rows $rows
 
-  $srcSubs = ($rows | Select-Object -ExpandProperty SrcSubscriptionId | Sort-Object -Unique)
+  $srcSubs  = ($rows | Select-Object -ExpandProperty SrcSubscriptionId | Sort-Object -Unique)
   $projects = ($rows | Select-Object -ExpandProperty MigrationProjectName | Sort-Object -Unique)
   Write-Info ("Unique source subscriptions: " + ($srcSubs -join ", "))
   Write-Info ("Unique migrate projects    : " + ($projects -join ", "))
@@ -116,17 +84,17 @@ try {
   $outObjects = New-Object System.Collections.Generic.List[object]
 
   foreach ($r in $rows) {
-    $vm = $r.VMName
-    $proj = $r.MigrationProjectName
-    $rg   = $r.SrcResourceGroup
-    $sub  = $r.SrcSubscriptionId
+    $vm  = $r.VMName
+    $proj= $r.MigrationProjectName
+    $rg  = $r.SrcResourceGroup
+    $sub = $r.SrcSubscriptionId
 
-    if ($Verbose) { Write-Info "Discovering VM '$vm' in project '$proj' (RG: $rg, Sub: $sub)..." }
+    if ($Detailed) { Write-Info "Discovering VM '$vm' in project '$proj' (RG: $rg, Sub: $sub)..." }
 
-    # 1) Primary: CLI discovered server (filtered by display-name)
+    # Primary: CLI discovered server
     $cliObj = Get-DiscoveredServerCli -projectName $proj -resourceGroup $rg -subscriptionId $sub -vmDisplayName $vm
 
-    # 2) Fallback: enumerate project machines via REST and match
+    # Fallback: enumerate via REST
     $restMatch = $null
     if (-not $cliObj) {
       $enum = Get-ProjectMachinesRest -projectName $proj -resourceGroup $rg -subscriptionId $sub
@@ -137,14 +105,8 @@ try {
     $disc = $cliObj
     if (-not $disc -and $restMatch) { $disc = $restMatch }
 
-    $osType      = $null
-    $osName      = $null
-    $bootType    = $null
-    $cpuCount    = $null
-    $memoryGB    = $null
-    $diskSummary = $null
+    $osType=$null; $osName=$null; $bootType=$null; $cpuCount=$null; $memoryGB=$null; $diskSummary=$null
 
-    # Extract common properties from discovered payload when available
     if ($disc) {
       $props = $disc.properties
       if ($props) {
@@ -152,7 +114,7 @@ try {
         $osName   = $props.osName
         if ($props.discoveryData -and $props.discoveryData.Count -gt 0) {
           $dd = $props.discoveryData[0]
-          $osType   = $dd.osType
+          $osType = $dd.osType
           if ($dd.extendedInfo) {
             $cpuCount    = $dd.extendedInfo.cpuCount
             $memoryGB    = $dd.extendedInfo.memoryInGB
@@ -162,11 +124,10 @@ try {
       }
     }
 
-    # Compute values before hashtable (fix for parser errors)
     $found  = [bool]$disc
     $source = "None"
-    if ($cliObj) { $source = "CLI:migrate/local" }
-    elseif ($restMatch) { $source = "REST:migrateProjects" }
+    if ($cliObj)      { $source = "CLI:migrate/local" }
+    elseif ($restMatch){ $source = "REST:migrateProjects" }
 
     $out = [PSCustomObject]@{
       Intake = [PSCustomObject]@{

@@ -1,70 +1,103 @@
 
+<#
+.SYNOPSIS
+  Logs in to Azure (SPN or interactive), validates prerequisites, and triggers Discovery + Business Application Mapping.
+
+.DESCRIPTION
+  - Supports Service Principal login via environment variables:
+      AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
+  - Optionally sets Azure subscription context (either parameter or inferred later).
+  - Ensures Azure CLI "migrate" extension is installed (auto-installs if missing).
+  - Calls discovery-physical.ps1, then business-mapping.ps1.
+
+.NOTES
+  Assumes Azure CLI is available on the GitHub runner (standard Microsoft-hosted images have az installed).
+  Discovery uses 'az migrate local get-discovered-server' for project machines (migrate extension). See Microsoft Learn.  # ref: turn3search12, turn3search4
+#>
+
 param(
-    [switch]$UseServicePrincipal,      # use SPN (clientId/secret + tenant provided through env or Azure CLI)
-    [string]$InputCsv = ".\migration_input.csv",
-    [string]$Mode     = "Replicate",   # DryRun | Replicate
-    [string]$SubscriptionId = ""       # optional - specify subscription to set context
+  [switch]$UseServicePrincipal,
+  [string]$InputCsv            = ".\migration_input.csv",
+  [string]$SubscriptionId      = "",  # optional override
+  [string]$DiscoveryScriptPath = ".\discovery-physical.ps1",
+  [string]$MappingScriptPath   = ".\business-mapping.ps1",
+  [string]$OutputFolder        = ".\out",
+  [switch]$VerboseLog
 )
 
 Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Write-Info($msg) {
+  Write-Host ("[INFO] " + $msg)
+}
+function Write-Warn($msg) {
+  Write-Warning ("[WARN] " + $msg)
+}
+function Write-Err($msg) {
+  Write-Error ("[ERROR] " + $msg)
+}
+
 try {
-    Write-Host "========== login-and-trigger.ps1 =========="
+  Write-Info "========== login-and-trigger.ps1 =========="
+  Write-Info "InputCsv: $InputCsv"
 
-    if ($UseServicePrincipal) {
-        Write-Host "Logging in with Service Principal..."
-        # Expect AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID in env or use az login with service-principal args here
-        if (-not $env:AZURE_CLIENT_ID -or -not $env:AZURE_CLIENT_SECRET -or -not $env:AZURE_TENANT_ID) {
-            Write-Error "AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID must be set in environment for SPN login."
-            exit 1
-        }
-        az login --service-principal -u $env:AZURE_CLIENT_ID -p $env:AZURE_CLIENT_SECRET --tenant $env:AZURE_TENANT_ID | Out-Null
+  if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    throw "Azure CLI 'az' is not available on PATH."
+  }
+
+  if ($UseServicePrincipal) {
+    Write-Info "Logging in with Service Principal..."
+    if (-not $env:AZURE_CLIENT_ID -or -not $env:AZURE_CLIENT_SECRET -or -not $env:AZURE_TENANT_ID) {
+      throw "AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID must be set for SP login."
     }
-    else {
-        Write-Host "Interactive login..."
-        az login | Out-Null
-    }
+    az login --service-principal -u $env:AZURE_CLIENT_ID -p $env:AZURE_CLIENT_SECRET --tenant $env:AZURE_TENANT_ID | Out-Null
+  }
+  else {
+    Write-Info "Interactive login..."
+    az login | Out-Null
+  }
 
-    if ($SubscriptionId -and $SubscriptionId.Trim() -ne "") {
-        Write-Host "Setting subscription: $SubscriptionId"
-        az account set --subscription $SubscriptionId
-    }
+  if ($SubscriptionId -and $SubscriptionId.Trim() -ne "") {
+    Write-Info "Setting subscription context: $SubscriptionId"
+    az account set --subscription $SubscriptionId
+  }
 
-    # Create token file for compatibility with older scripts (not used by replication-run but kept for parity)
-    try {
-        $accessToken = az account get-access-token --query accessToken -o tsv
-        if ($accessToken) {
-            $tokenFile = ".\token.enc"
-            $accessToken | Out-File -FilePath $tokenFile -Encoding ascii
-            Write-Host "Acquired access token and saved to $tokenFile"
-        }
-    } catch {
-        Write-Warning "Unable to save token file: $($_.Exception.Message)"
-    }
+  # Ensure migrate extension exists (auto-installs first time). See Microsoft Learn. # ref: turn3search4
+  $ext = az extension show --name migrate --only-show-errors 2>$null
+  if (-not $ext) {
+    Write-Info "Azure CLI 'migrate' extension missing. Installing..."
+    az extension add --name migrate --only-show-errors | Out-Null
+  } else {
+    Write-Info "Azure CLI 'migrate' extension present."
+  }
 
-    # Call discovery directly (no discovery script)
-    $replicationScript = ".\discovery-run.ps1"
-    if (-not (Test-Path $replicationScript)) {
-        Write-Error "Replication script not found at $replicationScript"
-        exit 1
-    }
-    
-    # Call replication-run directly (no discovery script)
-    $replicationScript = ".\replication-run.ps1"
-    if (-not (Test-Path $replicationScript)) {
-        Write-Error "Replication script not found at $replicationScript"
-        exit 1
-    }
+  if (-not (Test-Path $InputCsv)) { throw "Input CSV not found: $InputCsv" }
+  if (-not (Test-Path $DiscoveryScriptPath)) { throw "Discovery script not found: $DiscoveryScriptPath" }
+  if (-not (Test-Path $MappingScriptPath))   { throw "Business mapping script not found: $MappingScriptPath" }
 
-    # Export MIG_MODE and MIG_INPUT_CSV to environment to be consumed by downstream scripts if needed
-    $env:MIG_MODE = $Mode
-    $env:MIG_INPUT_CSV = $InputCsv
+  if (-not (Test-Path $OutputFolder)) {
+    Write-Info "Creating output folder: $OutputFolder"
+    New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
+  }
 
-    Write-Host "Calling replication-run..."
-    & $replicationScript -TokenFile ".\token.enc" -InputCsv $InputCsv -Mode $Mode
+  # Environment hints for downstream scripts
+  $env:MIG_INPUT_CSV   = (Resolve-Path $InputCsv).Path
+  $env:MIG_OUTPUT_DIR  = (Resolve-Path $OutputFolder).Path
+  $env:MIG_VERBOSE_LOG = ($VerboseLog.IsPresent ? "true" : "false")
 
-    Write-Host "login-and-trigger finished."
+  Write-Info "Starting Discovery phase..."
+  & $DiscoveryScriptPath -InputCsv $InputCsv -OutputFolder $OutputFolder -Verbose:$VerboseLog
+
+  $discFile = Join-Path $OutputFolder "discovery-output.json"
+  if (-not (Test-Path $discFile)) { throw "Discovery output missing: $discFile" }
+
+  Write-Info "Starting Business Application Mapping phase..."
+  & $MappingScriptPath -DiscoveryFile $discFile -OutputFolder $OutputFolder -Verbose:$VerboseLog
+
+  Write-Info "login-and-trigger finished successfully."
 }
 catch {
-    Write-Error "Fatal error in login-and-trigger: $($_.Exception.Message)"
-    exit 1
-}
+  Write-Err "Fatal error in login-and-trigger: $($_.Exception.Message)"
+  exit 1  exit 1
+

@@ -1,18 +1,3 @@
-<#
-.SYNOPSIS
-  Logs in to Azure (SPN or interactive), validates prerequisites, and triggers Discovery + Business Application Mapping.
-
-.DESCRIPTION
-  - Supports Service Principal login via environment variables:
-      AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
-  - Optionally sets Azure subscription context (either parameter or inferred later).
-  - Ensures Azure CLI "migrate" extension is installed (auto-installs if missing).
-  - Calls discovery-physical.ps1, then business-mapping.ps1.
-
-.NOTES
-  Assumes Azure CLI is available on the runner/host.
-  Discovery uses 'az migrate local get-discovered-server' (Azure CLI migrate extension).
-#>
 
 param(
   [switch]$UseServicePrincipal,
@@ -35,9 +20,7 @@ try {
   Write-Info "========== login-and-trigger.ps1 =========="
   Write-Info "InputCsv: $InputCsv"
 
-  if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-    throw "Azure CLI 'az' is not available on PATH."
-  }
+  if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw "Azure CLI 'az' is not available on PATH." }
 
   if ($UseServicePrincipal) {
     Write-Info "Logging in with Service Principal..."
@@ -45,8 +28,7 @@ try {
       throw "AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID must be set for SP login."
     }
     az login --service-principal -u $env:AZURE_CLIENT_ID -p $env:AZURE_CLIENT_SECRET --tenant $env:AZURE_TENANT_ID | Out-Null
-  }
-  else {
+  } else {
     Write-Info "Interactive login..."
     az login | Out-Null
   }
@@ -56,7 +38,6 @@ try {
     az account set --subscription $SubscriptionId
   }
 
-  # Ensure migrate extension exists (auto-installs first time if missing)
   $ext = az extension show --name migrate --only-show-errors 2>$null
   if (-not $ext) {
     Write-Info "Azure CLI 'migrate' extension missing. Installing..."
@@ -74,19 +55,18 @@ try {
     New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
   }
 
-  # Environment hints for downstream scripts
   $env:MIG_INPUT_CSV   = (Resolve-Path $InputCsv).Path
   $env:MIG_OUTPUT_DIR  = (Resolve-Path $OutputFolder).Path
   $env:MIG_VERBOSE_LOG = ($VerboseLog.IsPresent ? "true" : "false")
 
   Write-Info "Starting Discovery phase..."
-  & $DiscoveryScriptPath -InputCsv $InputCsv -OutputFolder $OutputFolder -Verbose:$VerboseLog
+  & $DiscoveryScriptPath -InputCsv $InputCsv -OutputFolder $OutputFolder -Detailed:$VerboseLog
 
   $discFile = Join-Path $OutputFolder "discovery-output.json"
   if (-not (Test-Path $discFile)) { throw "Discovery output missing: $discFile" }
 
   Write-Info "Starting Business Application Mapping phase..."
-  & $MappingScriptPath -DiscoveryFile $discFile -OutputFolder $OutputFolder -Verbose:$VerboseLog
+  & $MappingScriptPath -DiscoveryFile $discFile -OutputFolder $OutputFolder -Detailed:$VerboseLog
 
   Write-Info "login-and-trigger finished successfully."
 }
@@ -94,4 +74,3 @@ catch {
   Write-Err "Fatal error in login-and-trigger: $($_.Exception.Message)"
   exit 1
 }
-

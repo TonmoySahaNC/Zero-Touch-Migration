@@ -1,10 +1,9 @@
 
 <#
-  v124 Discovery (parameterless)
-  - Fix: robust Count checks under StrictMode (no .Count on strings)
-  - Extra diagnostics for CSV headers
-  - REST-first enumerate once per unique project; write full inventory JSON/CSV
-  - Post-process join to discovery-output.json and csv-to-discovery-join.csv
+  v127 Discovery (parameterless)
+  - REST-first inventory per unique project with pagination (nextLink/continuationToken; pageSize=100)
+  - StrictMode-safe counting & manifest
+  - Post-processing join: matches CSV VMName and optionally CSV DNSName to inventory candidates (name/machineName/fqdn)
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -12,15 +11,29 @@ function Write-Info($msg) { Write-Host ("[INFO] " + $msg) }
 function Write-Warn($msg) { Write-Warning ("[WARN] " + $msg) }
 function Write-Err($msg)  { Write-Error ("[ERROR] " + $msg) }
 
-# ---- Helpers ----
 function Get-Prop { param($Object,[string]$Name) if ($null -eq $Object) { return $null } $p=$Object.PSObject.Properties[$Name]; if($p){$p.Value}else{$null} }
-function Normalize-Name([string]$name){ if(-not $name){return $null} $n=$name.Trim().ToLower(); if($n.Contains('.')){$n=$n.Split('.')[0]} return $n }
+function Normalize-Name([string]$name){ if(-not $name){return $null } $n=$name.Trim().ToLower(); if($n.Contains('.')){ $n=$n.Split('.')[0] } return $n }
 function Save-Text($path,$text){ try{ $d=Split-Path $path; if(-not(Test-Path $d)){ New-Item -ItemType Directory -Path $d -Force|Out-Null }; $text|Out-File -FilePath $path -Encoding UTF8 }catch{ Write-Warn "Failed writing $path : $($_.Exception.Message)" }}
 function Save-Json($path,$obj,$depth=8){ try{ $json=$obj|ConvertTo-Json -Depth $depth; Save-Text -path $path -text $json }catch{ Write-Warn "Failed JSON save $path : $($_.Exception.Message)" }}
-function Invoke-AzJson([string[]]$CliArgs,[string]$RawOutPath){ try{ if(-not($CliArgs -contains '--output') -and -not($CliArgs -contains '-o')){ $CliArgs+=@('--output','json') } $cmdLine="az "+($CliArgs -join ' '); Write-Info ("Running: "+$cmdLine); $res=& az @CliArgs 2>&1; $text=($res|Out-String); if($RawOutPath){ Save-Text -path $RawOutPath -text $text }; try{ return ($text|ConvertFrom-Json) }catch{ Write-Warn "JSON parse failed for: $cmdLine"; return $null } }catch{ Write-Warn "az failed: $($_.Exception.Message)"; return $null } }
-function Rest-EnumerateMachines([string]$sub,[string]$rg,[string]$proj,[string]$diagDir){ $uri="/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.Migrate/migrateProjects/$proj/machines?api-version=2018-09-01-preview"; $raw=Join-Path $diagDir "rest-migrateProjects-machines.txt"; return (Invoke-AzJson -CliArgs @('rest','--method','get','--url',"https://management.azure.com$uri") -RawOutPath $raw) }
+function Invoke-AzRaw([string]$Url,[string]$RawOutPath){ try{ $cmdArgs=@('rest','--method','get','--url',$Url); Write-Info ("Running: az " + ($cmdArgs -join ' ')); $res = & az @cmdArgs 2>&1; $text = ($res | Out-String); if($RawOutPath){ Save-Text -path $RawOutPath -text $text }; try{ return ($text | ConvertFrom-Json) } catch { Write-Warn "JSON parse failed for: $Url"; return $null } } catch { Write-Warn "az failed: $($_.Exception.Message)"; return $null } }
 
-# ---- Environment ----
+function Rest-EnumerateMachinesAll([string]$sub,[string]$rg,[string]$proj,[string]$diagDir){
+  $base = "https://management.azure.com/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.Migrate/migrateProjects/$proj/machines?api-version=2018-09-01-preview&pageSize=100"
+  $pageIndex = 1
+  $all = New-Object System.Collections.Generic.List[object]
+  $url = $base
+  do {
+    $rawPath = Join-Path $diagDir ("rest-migrateProjects-machines-page" + $pageIndex + ".txt")
+    $json = Invoke-AzRaw -Url $url -RawOutPath $rawPath
+    $vals = @((Get-Prop -Object $json -Name 'value'))
+    foreach($v in $vals){ $all.Add($v) | Out-Null }
+    $next = Get-Prop -Object $json -Name 'nextLink'
+    $pageIndex++
+    $url = $next
+  } while ($url)
+  return $all
+}
+
 $InputCsv     = $env:MIG_INPUT_CSV
 $OutputFolder = $env:MIG_OUTPUT_DIR
 $Detailed     = ($env:MIG_DETAILED -eq 'true')
@@ -35,7 +48,6 @@ Write-Info "OutputFolder : $OutputFolder"
 $rows = @((Import-Csv -Path $InputCsv))
 if(($rows|Measure-Object).Count -eq 0){ throw "Input CSV is empty: $InputCsv" }
 
-# Required columns
 $req=@('MigrationType','SrcSubscriptionId','SrcResourceGroup','MigrationProjectName','TgtSubscriptionId','TgtResourceGroup','TgtVNet','TgtSubnet','TgtLocation','BootDiagStorageAccountName','BootDiagStorageAccountRG','AdminUsername','VMName','BusinessApplicationName')
 $present=@($rows[0].PSObject.Properties.Name)
 $missing=@($req | Where-Object { $_ -notin $present })
@@ -45,12 +57,10 @@ if( ( $missing | Measure-Object ).Count -gt 0 ){
   throw ("Input CSV missing required columns: "+($missing -join ', '))
 }
 
-# Diagnostic root
 $diagRoot = Join-Path $OutputFolder 'raw'
 if(-not(Test-Path $diagRoot)){ New-Item -ItemType Directory -Path $diagRoot -Force|Out-Null }
 if($DebugRaw){ Save-Json -path (Join-Path $diagRoot 'csv-rows.json') -obj $rows -depth 6 }
 
-# ---- Phase 1: Enumerate ALL machines per unique (sub,rg,project) ----
 $sets = @($rows | Select-Object -Property SrcSubscriptionId,SrcResourceGroup,MigrationProjectName -Unique)
 $inventoryCombined = New-Object System.Collections.Generic.List[object]
 $inventoryBySet = @{}
@@ -60,25 +70,18 @@ foreach($s in $sets){
   $setKey = "$($sub)|$($rg)|$($proj)"
   $projDiag = Join-Path $diagRoot ("proj-"+$proj)
   if(-not(Test-Path $projDiag)){ New-Item -ItemType Directory -Path $projDiag -Force|Out-Null }
-  Write-Info "Enumerating project '$proj' (RG:$rg, Sub:$sub) via REST..."
-  $enum = Rest-EnumerateMachines -sub $sub -rg $rg -proj $proj -diagDir $projDiag
-  $vals = @((Get-Prop -Object $enum -Name 'value'))
-  if(($vals|Measure-Object).Count -gt 0){
-    $inventoryBySet[$setKey] = $vals
-    foreach($m in $vals){ $inventoryCombined.Add($m) | Out-Null }
-    Save-Json -path (Join-Path $projDiag "discovery-full-$proj.json") -obj $vals -depth 8
-  } else {
-    $inventoryBySet[$setKey] = @()
-    Write-Warn "No machines returned by REST for project '$proj'."
-  }
+  Write-Info "Enumerating project '$proj' (RG:$rg, Sub:$sub) via REST with pagination..."
+  $allVals = Rest-EnumerateMachinesAll -sub $sub -rg $rg -proj $proj -diagDir $projDiag
+  $inventoryBySet[$setKey] = $allVals
+  foreach($m in $allVals){ $inventoryCombined.Add($m) | Out-Null }
+  Save-Json -path (Join-Path $projDiag "discovery-full-$proj.json") -obj $allVals -depth 8
+  Write-Info ("Project '$proj' total machines: " + (($allVals|Measure-Object).Count))
 }
 
-# Combined full inventory persist (JSON + CSV)
 $invDir = Join-Path $OutputFolder 'inventory'
 if(-not(Test-Path $invDir)){ New-Item -ItemType Directory -Path $invDir -Force|Out-Null }
 Save-Json -path (Join-Path $invDir 'discovery-full.json') -obj $inventoryCombined -depth 8
 
-# Flatten to CSV
 $flat = foreach($m in $inventoryCombined){
   $props = Get-Prop -Object $m -Name 'properties'
   $disc  = @($(Get-Prop -Object $props -Name 'discoveryData'))
@@ -98,14 +101,16 @@ $flat = foreach($m in $inventoryCombined){
 $flat | Export-Csv -Path (Join-Path $invDir 'discovery-full.csv') -NoTypeInformation -Encoding UTF8
 Write-Info ("Inventory collected. Machines (combined): " + (($inventoryCombined|Measure-Object).Count))
 
-# ---- Phase 2: Post-process join -> discovery-output.json (for mapping) ----
 $outObjects = New-Object System.Collections.Generic.List[object]
 foreach($r in $rows){
-  $vm   = $r.VMName
+  $vm      = $r.VMName
+  $csvNorm = Normalize-Name $vm
+  $csvDns  = $null
+  if ($r.PSObject.Properties['DNSName']) { $csvDns = Normalize-Name $r.DNSName }
+
   $proj = $r.MigrationProjectName
   $rg   = $r.SrcResourceGroup
   $sub  = $r.SrcSubscriptionId
-  $csvNorm = Normalize-Name $vm
   $setKey = "$sub|$rg|$proj"
   $projList = @()
   if($inventoryBySet.ContainsKey($setKey)){ $projList = @($inventoryBySet[$setKey]) }
@@ -122,10 +127,13 @@ foreach($r in $rows){
       if($mn){ $null = $names.Add($mn) }
       if($fq){ $null = $names.Add($fq) }
     }
-    if($names.Contains($csvNorm)){ $match=$m; $matchReason='name|machineName|fqdn'; break }
+    if($names.Contains($csvNorm) -or ($csvDns -and $names.Contains($csvDns))){
+      $match=$m
+      $matchReason = $names.Contains($csvNorm) ? 'name|machineName|fqdn' : 'DNSName=>fqdn|machineName'
+      break
+    }
   }
 
-  # Build enriched record
   $osType=$null; $osName=$null; $bootType=$null; $cpuCount=$null; $memoryGB=$null; $diskSummary=$null
   if($match){
     $props = Get-Prop -Object $match -Name 'properties'
@@ -156,6 +164,7 @@ foreach($r in $rows){
       AdminUsername              = $r.AdminUsername
       VMName                     = $r.VMName
       BusinessApplicationName    = $r.BusinessApplicationName
+      DNSName                    = ($r.PSObject.Properties['DNSName'] ? $r.DNSName : $null)
     }
     Discovery = [PSCustomObject]@{
       FoundInAzureMigrate = [bool]$match
@@ -173,15 +182,19 @@ foreach($r in $rows){
   $outObjects.Add($out) | Out-Null
 }
 
-# Save join results for mapping and an auxiliary join CSV for quick review
-$outFile = Join-Path $OutputFolder 'discovery-output.json'
+$outFile   = Join-Path $OutputFolder 'discovery-output.json'
+$joinCsv   = Join-Path $OutputFolder 'csv-to-discovery-join.csv'
+$fullJson  = Join-Path (Join-Path $OutputFolder 'inventory') 'discovery-full.json'
+$fullCsv   = Join-Path (Join-Path $OutputFolder 'inventory') 'discovery-full.csv'
+
 $outObjects | ConvertTo-Json -Depth 8 | Out-File -FilePath $outFile -Encoding UTF8
 Write-Info ("Discovery complete. Records: "+ (($outObjects|Measure-Object).Count))
 Write-Info ("Saved file: $outFile")
 
-$joinCsv = foreach($o in $outObjects){
+$joinData = foreach($o in $outObjects){
   [PSCustomObject]@{
     VMName          = $o.Intake.VMName
+    DNSName         = $o.Intake.DNSName
     Found           = $o.Discovery.FoundInAzureMigrate
     MatchReason     = $o.Discovery.MatchReason
     MatchedId       = (Get-Prop -Object $o.Discovery.Raw -Name 'id')
@@ -192,6 +205,24 @@ $joinCsv = foreach($o in $outObjects){
     MemoryGB        = $o.Discovery.MemoryGB
   }
 }
-$joinCsv | Export-Csv -Path (Join-Path $OutputFolder 'csv-to-discovery-join.csv') -NoTypeInformation -Encoding UTF8
-Write-Info ("Saved join CSV: " + (Join-Path $OutputFolder 'csv-to-discovery-join.csv'))
+$joinData | Export-Csv -Path $joinCsv -NoTypeInformation -Encoding UTF8
+Write-Info ("Saved join CSV: " + $joinCsv)
+
+$manifest = [ordered]@{
+  OutputDir    = $OutputFolder
+  Inventory    = [ordered]@{
+    FullJson = $fullJson
+    FullCsv  = $fullCsv
+    Machines = (($inventoryCombined|Measure-Object).Count)
+  }
+  JoinResults  = [ordered]@{
+    DiscoveryJson = $outFile
+    JoinCsv       = $joinCsv
+    Rows          = (($outObjects|Measure-Object).Count)
+    FoundCount    = (($outObjects | Where-Object { $_.Discovery.FoundInAzureMigrate } | Measure-Object).Count)
+  }
+}
+Save-Json -path (Join-Path $OutputFolder 'manifest.json') -obj $manifest -depth 6
+Write-Info ("Saved manifest: " + (Join-Path $OutputFolder 'manifest.json'))
+Write-Info ("Manifest summary ⇒ Machines:" + $manifest.Inventory.Machines + ", Rows:" + $manifest.JoinResults.Rows + ", Found:" + $manifest.JoinResults.FoundCount)
 
